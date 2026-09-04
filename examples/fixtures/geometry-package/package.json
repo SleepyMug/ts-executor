@@ -1,0 +1,16 @@
+{
+  "name": "@example/geometry",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./statistics": {
+      "types": "./statistics.d.ts",
+      "import": "./statistics.js"
+    }
+  }
+}

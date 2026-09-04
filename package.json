@@ -1,0 +1,42 @@
+{
+  "name": "ts-executor",
+  "version": "0.3.0",
+  "description": "Execute checked TypeScript as JSON functions or stdout processes in fresh Node subprocesses.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=18.19.0"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.js",
+    "check": "npm run typecheck && npm test",
+    "examples": "npm run build && node examples/run-all.mjs",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "typescript",
+    "executor",
+    "subprocess",
+    "json",
+    "stdout"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@types/node": "^18.19.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
+  }
+}

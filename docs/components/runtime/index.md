@@ -1,0 +1,63 @@
+# Runtime Component
+
+> A neutral spawn primitive supports separate JSON-function and stdout-process bootstraps and host-side interpreters.
+
+## Overview
+
+Every execution starts exactly one plain Node subprocess with `spawn(process.execPath, ...)`; there is no message channel. A neutral primitive owns startup, the executor-owned `tsx` preload, regular-file stream capture, direct-child reaping, and raw termination metadata. It returns exit code, signal, stdout, and stderr without knowing whether the caller expects JSON or stdout.
+
+Flavor-specific host runners choose distinct compiled JavaScript bootstraps and interpret distinct private envelopes. Ordinary package code, including network clients, runs entirely in the subprocess. Freshness is a lifecycle guarantee, not a sandbox.
+
+## Provided APIs
+
+### Neutral process primitive
+
+- `runSubprocess(workspace, cwd, bootstrap, arguments): Promise<SubprocessResult>` — internal primitive that opens output files, starts one direct child without a shell or IPC, waits for its `exit`, closes parent handles, reads both output files, and returns `exitCode`, `signal`, `stdout`, `stderr`, and any startup/output or handle-close failures. It never interprets a flavor status envelope.
+- Freshness invariant — every call starts and reaps a distinct process, so globals, singleton state, ESM module instances, and package clients do not survive execution.
+- Output contract — fd 1 and fd 2 are mode-`0o600` private regular files rather than inherited pipes. Writes flushed by the direct child before publication are included. Descendant writes racing direct-child exit may or may not be observed and never delay the host's wait.
+
+### TSFunc runtime
+
+- `runTSFuncProcess(workspace, cwd, inputEnvelope): Promise<{ value, stdout, stderr }>` — internal flavor runner that writes a private strict-JSON input file, selects `ts-func-subprocess.js`, validates its result envelope against exit status, and returns JSON value plus both streams.
+- Program contract — the module exports sync or async `main(input)`. Omitted input is represented separately and passed as `undefined`; supplied input and every successful result must be strict JSON.
+- Failure contract — reported guest/import/input/result-validation failures use a serialized error envelope. Runtime errors receive captured stdout/stderr.
+
+### Proc runtime
+
+- `runProcProcess(workspace, cwd): Promise<string>` — internal flavor runner that selects `proc-subprocess.js`, validates its private status envelope against exit status, and returns exact stdout.
+- Program contract — the module exports sync or async `main()`; it receives no arguments and must resolve to exactly `undefined`. A returned value is a reported guest-contract failure.
+- Failure contract — every classified post-start failure becomes exported `ProcExecutionError` with captured stdout/stderr and exact nullable exit code/signal. Serialized guest errors preserve useful name/message/stack.
+- Success output contract — only stdout is returned. Captured stderr is deliberately discarded after success and is not merged into stdout.
+
+### Shared bootstrap completion
+
+Both compiled flavor entrypoints load shared executor-owned completion support before guest import. It captures stdout/stderr terminal `end` capabilities and `process.exit`, restores the caller-visible loader environment, terminally ends both streams, atomically renames one private envelope, and invokes captured exit. Terminal ending fully uncorks queued writes without reading guest-shadowable cork counters. Guest-retained timers and replacement of `process.exit` therefore do not retain a completed direct child.
+
+## Consumed APIs
+
+- [Materialized packages](../modules/index.md#provided-apis) — packages are imported through ordinary Node ESM lookup from the absolute generated entrypoint.
+- [Host-subprocess execution boundary](../../boundaries/host-subprocess-execution.md) — defines common arguments/output/lifecycle and both private flavor protocols.
+- [`node:child_process.spawn`](https://nodejs.org/api/child_process.html#child_processspawncommand-args-options) — starts the direct child without a shell or message channel and applies operation `cwd`.
+- [`node:fs`](https://nodejs.org/api/fs.html) — supplies private regular output files and same-directory atomic rename for terminal publication.
+- [`tsx`](https://tsx.is/) — preloads TypeScript support from an executor-owned absolute path; it does not replace package resolution.
+- [Node child-process file execution journal](../../experiment_journal/node-child-process-files.md) — records the plain-spawn, file-output, terminal stream-ending, environment-restoration, rename, descendant-output, and reaping behavior verified on Node v24.15.0, Linux x64.
+
+## Workflows
+
+### Run a TSFunc entrypoint
+
+1. The runner writes `input.json`, then the primitive opens stdout/stderr and starts Node with `ts-func-subprocess.js` plus absolute entrypoint/input/result/temporary paths.
+2. The bootstrap restores the caller-visible environment, parses input, imports `main.ts`, verifies `main`, and awaits `main(input)`.
+3. It validates the JSON result or serializes a thrown value, flushes both streams, atomically publishes `result.json`, and exits 0 or 1.
+4. The primitive returns raw termination/output; the TSFunc runner validates status/envelope agreement and returns or throws.
+
+### Run a Proc entrypoint
+
+1. The primitive opens stdout/stderr and starts Node with `proc-subprocess.js` plus absolute entrypoint/status/temporary paths. There is no input file.
+2. The bootstrap restores the environment, imports `main.ts`, verifies `main`, and awaits `main()` with no arguments.
+3. Exactly `undefined` publishes success; a returned value or thrown error publishes serialized failure. Both streams are flushed before atomic `proc-status.json` publication.
+4. The primitive returns raw termination/output; the Proc runner validates status/envelope agreement, returns stdout alone on success, or throws `ProcExecutionError` containing both streams and termination fields.
+
+## Execution-context Constraints
+
+Subprocess code has normal Node authority, including built-ins, filesystem, working-directory changes, child processes, network, dynamic import, and environment access. The executor owns and reaps only the direct child; it neither kills nor awaits descendants. A hostile descendant can interfere with filesystem cleanup. The package declares Node 18.19 or newer for the `tsx` `--import` path, while relied-on subprocess file behavior has been exercised here only on Node v24.15.0, Linux x64. There is no public backend/mode/plugin abstraction, timeout, cancellation, environment filtering, process pool, or process-tree manager.
