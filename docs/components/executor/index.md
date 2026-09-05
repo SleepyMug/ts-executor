@@ -1,24 +1,32 @@
 # Executor Component
 
-> `TSFuncExecutor` and `ProcExecutor` compose shared catalog, checking, workspace, cwd, and cleanup orchestration while enforcing separate execution contracts.
+> `TSFuncExecutor` and `ProcExecutor` provide agent guidance and compose shared catalog, checking, workspace, cwd, and cleanup orchestration while enforcing separate execution contracts.
 
 ## Overview
 
-Each public executor owns an internal `ExecutorCore`; neither inherits from a public base class. The core owns a mutable module registry, but registration captures fixed discovery metadata and every operation captures a frozen ordered snapshot before asynchronous work begins. Common workspaces are private directories below `resolutionRoot` and are removed when an operation settles. Execution requires an independent absolute working directory.
+Each public executor owns an internal `ExecutorCore`; neither inherits from a public base class. The core owns a mutable module registry, but registration captures fixed discovery metadata and every catalog, checking, or execution operation captures a frozen ordered snapshot before asynchronous work begins. It also holds deterministic agent guidance assembled from shared text segments and one flavor-specific segment. Common workspaces are private directories below `resolutionRoot` and are removed when an operation settles. Execution requires an independent absolute working directory.
 
 ## Provided APIs
 
-### Shared public API
+### Model-facing tools
+
+- `executor.listModules({ query? }?): Promise<readonly ModuleSummary[]>` — lists the current snapshot in registration order, optionally filtering case-insensitively across specifier and description. Each entry contains `{ specifier, packageRoot, description? }`, with an absolute package directory for inspecting `package.json` and interface declarations. It returns no declaration contents and performs no filesystem work or materialization.
+- `executor.execute(...)` — runs a single TypeScript program, checking it by default. The selected executor defines the input/output contract below.
+
+The harness exposes these two methods as tools and supplies filesystem access for exploring the returned package roots.
+
+The [harness adapter example](../../../examples/harness-adapter.mjs) supplies JSON input schemas, argument validation, and model-visible error responses. It accepts string-only absolute `cwd`, fixes pre-execution checking on, preserves TSFunc input omission, and forwards diagnostics and captured runtime output. [The runnable flow](../../../examples/05-agent-harness.mjs) demonstrates discovery, file inspection, a failed check, and corrected execution. These are harness examples, not additional executor APIs.
+
+### Harness API and shared types
 
 - `new TSFuncExecutor({ resolutionRoot })` and `new ProcExecutor({ resolutionRoot })` — create separate executors. `resolutionRoot` is a non-empty path string or local `file:` URL. Relative strings resolve against the constructor call's host working directory. Operations reject a missing or non-directory root. The root controls workspace placement, ambient package ancestry, checking, and runtime ESM resolution; it is not the guest working directory.
-- `executor.modules.register(module): void` — adds one exact package specifier and rejects duplicates, invalid package names, or missing materializers. Registry changes affect only later snapshots.
+- `executor.getInstructions(): string` — synchronously returns deterministic Markdown describing only how to use `listModules` and `execute`, including inspection of package files and the selected executor's execution contract. It performs no filesystem or module operation and embeds no catalog state or harness API instructions.
+- `executor.modules.register(module): void` — adds one exact package specifier and rejects duplicates, invalid package names, missing or non-absolute discovery roots, or missing materializers. Registry changes affect only later snapshots.
 - `executor.modules.snapshot(): readonly Module[]` — returns a frozen ordered copy whose membership and discovery metadata cannot be altered by later registration. Module-owned external state remains outside this immutability guarantee.
-- `executor.listModules({ query? }?): Promise<readonly ModuleSummary[]>` — lists the current snapshot in registration order, optionally filtering case-insensitively across specifier and description.
-- `executor.getTypes(specifier): Promise<DeclarationTree>` — resolves a registered package or exported subpath with NodeNext rules and returns the entry declaration plus all transitively referenced declaration files owned by that package. It rejects unknown or untyped specifiers.
 - `executor.check({ source }): Promise<CheckResult>` — checks one `main.ts` with strict ES2022, Node-only, no-emit NodeNext settings and returns stable, one-based diagnostics.
 - `ExecutorOptions` — `{ readonly resolutionRoot: string | URL }`, shared by both constructors.
 - `TypeCheckError` — thrown by either checked execution when `check` returns errors; exposes the immutable diagnostics array.
-- `DeclarationTree` — `{ entrypoint: string; files: Readonly<Record<string, string>> }`, with POSIX paths relative to the owning package root.
+- `ModuleSummary` — `{ readonly specifier: string; readonly packageRoot: string; readonly description?: string }`. Discovery roots belong to the module and remain readable between operations; they are not temporary executor workspaces.
 
 Both `execute` methods require `cwd` as an absolute native path string or query- and fragment-free local `file:` URL naming an existing directory. Both check by default and skip checking only when `check === false`.
 
@@ -42,15 +50,16 @@ Both `execute` methods require `cwd` as an absolute native path string or query-
 - [Package materialization](../modules/index.md#provided-apis) — builds the physical package graph for a registry snapshot.
 - [Fresh subprocess execution](../runtime/index.md#provided-apis) — supplies neutral process capture plus separate TSFunc and Proc protocols.
 - [Host-subprocess execution boundary](../../boundaries/host-subprocess-execution.md) — constrains file modes, arguments, flavor envelopes, output, errors, and lifecycle.
-- [TypeScript compiler API](https://github.com/microsoft/TypeScript/wiki/Using-the-Compiler-API) — performs NodeNext resolution, declaration traversal, and diagnostics.
+- [TypeScript compiler API](https://github.com/microsoft/TypeScript/wiki/Using-the-Compiler-API) — performs NodeNext resolution and diagnostics.
 
 ## Workflows
 
-### Discover and inspect modules
+### Prepare an agent and inspect modules
 
-1. `listModules` freezes the registry view and filters metadata without materializing packages.
-2. `getTypes` creates a common workspace from one snapshot and resolves the requested entry using its physical package graph.
-3. It traverses only resolved `.d.ts`, `.d.mts`, and `.d.cts` files inside the owning package, then removes the workspace.
+1. The harness adds `getInstructions()` to the agent prompt and exposes `listModules` and `execute` as tools.
+2. `listModules` freezes the registry view and filters metadata, including absolute package roots, without materializing packages.
+3. The model uses filesystem access to read `package.json` at a returned root and follow package `types` and `exports` to relevant declarations and referenced files.
+4. The model submits TypeScript to `execute`, which checks by default, and repairs any reported diagnostics before retrying.
 
 ### Check or execute source
 

@@ -10,11 +10,6 @@ export type JsonValue =
   | readonly JsonValue[]
   | { readonly [key: string]: JsonValue };
 
-export interface DeclarationTree {
-  readonly entrypoint: string;
-  readonly files: Readonly<Record<string, string>>;
-}
-
 export interface MaterializeContext {
   /** Operation-local directory a module may populate. */
   readonly packageRoot: string;
@@ -26,14 +21,14 @@ export interface MaterializedModule {
   readonly packageRoot: string;
 }
 
-export interface Module {
-  readonly specifier: string;
-  readonly description?: string;
+export interface Module extends ModuleSummary {
   materialize(context: MaterializeContext): Promise<MaterializedModule>;
 }
 
 export interface ModuleSummary {
   readonly specifier: string;
+  /** Absolute package directory for API inspection; must remain readable between operations. */
+  readonly packageRoot: string;
   readonly description?: string;
 }
 

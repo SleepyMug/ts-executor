@@ -14,6 +14,7 @@ node examples/01-basic-execution.mjs
 node examples/02-package-module.mjs
 node examples/03-network-client-package.mjs
 node examples/04-process-stdout.mjs
+node examples/05-agent-harness.mjs
 ```
 
 ## Samples
@@ -21,9 +22,12 @@ node examples/04-process-stdout.mjs
 | Sample | Demonstrates |
 | --- | --- |
 | [`01-basic-execution.mjs`](01-basic-execution.mjs) | `TSFuncExecutor` checked TypeScript with JSON input/results and captured subprocess output. |
-| [`02-package-module.mjs`](02-package-module.mjs) | Registering a real ESM package, listing it, reading its declaration tree, and importing an exported subpath. |
+| [`02-package-module.mjs`](02-package-module.mjs) | Registering a real ESM package, discovering its absolute root, reading declarations from disk, and importing an exported subpath. |
 | [`03-network-client-package.mjs`](03-network-client-package.mjs) | Using a declaration-bearing network client as a plain package and constructing it independently in each fresh subprocess. Generated Connect clients use the same pattern. |
 | [`04-process-stdout.mjs`](04-process-stdout.mjs) | `ProcExecutor` running a no-argument `main()` and returning its exact stdout string. |
+| [`05-agent-harness.mjs`](05-agent-harness.mjs) | JSON tool definitions and dispatch, filesystem inspection, type-error feedback, and corrected execution using [`harness-adapter.mjs`](harness-adapter.mjs). |
+
+The adapter is example harness code for either executor. It exposes only `listModules` and `execute`, validates their JSON arguments, keeps checking enabled under harness control, and maps results and errors to `{ isError, content }` responses. The `content` string holds JSON for module lists, TSFunc results, and errors, or exact stdout for Proc success. Register the definitions using your harness's tool protocol and preserve the error flag when delivering responses to the model. The example assumes filesystem tools can read the listed package roots. It does not depend on a particular model provider or SDK.
 
 ## Fixtures
 

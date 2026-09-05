@@ -58,12 +58,8 @@ test("ProcExecutor shares module discovery, NodeNext checking, and a fresh physi
   }));
 
   assert.deepEqual(await executor.listModules({ query: "STATE" }), [
-    { specifier: "@fixture/proc-state", description: "Proc state fixture." },
+    { specifier: "@fixture/proc-state", packageRoot, description: "Proc state fixture." },
   ]);
-  assert.deepEqual(await executor.getTypes("@fixture/proc-state"), {
-    entrypoint: "index.d.ts",
-    files: { "index.d.ts": "export function bump(): number;\n" },
-  });
   const checked = await executor.check({
     source: "export function main(): void { const bad: string = 1; void bad; }\n",
   });

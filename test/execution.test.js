@@ -607,6 +607,7 @@ test("execution cleans workspaces after result and materialization failures", as
   const broken = new TSFuncExecutor({ resolutionRoot: root });
   broken.modules.register({
     specifier: "@fixture/broken",
+    packageRoot: join(root, "broken"),
     async materialize() {
       throw new Error("materialization failed");
     },

@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TSFuncExecutor, packageModule } from "../dist/index.js";
 
@@ -15,9 +17,13 @@ executor.modules.register(packageModule({
   description: "Geometry and statistics fixture package.",
 }));
 
-console.log("Modules:", await executor.listModules());
-const declarations = await executor.getTypes("@example/geometry");
-console.log("Declaration files:", Object.keys(declarations.files));
+const modules = await executor.listModules();
+console.log("Modules:", modules);
+const listedRoot = modules[0].packageRoot;
+const manifest = JSON.parse(await readFile(join(listedRoot, "package.json"), "utf8"));
+const declarationPath = join(listedRoot, manifest.exports["."].types);
+console.log("Declaration file:", declarationPath);
+console.log(await readFile(declarationPath, "utf8"));
 
 const result = await executor.execute({
   source: `

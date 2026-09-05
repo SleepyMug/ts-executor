@@ -1,3 +1,4 @@
+import { isAbsolute, resolve } from "node:path";
 import type { Module } from "./types.js";
 
 const PACKAGE_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
@@ -18,9 +19,13 @@ export class ModuleRegistry {
 
   register(module: Module): void {
     const specifier = module.specifier;
+    const packageRoot = module.packageRoot;
     const description = module.description;
     const materialize = module.materialize;
     assertPackageSpecifier(specifier);
+    if (typeof packageRoot !== "string" || !isAbsolute(packageRoot)) {
+      throw new TypeError(`Module ${JSON.stringify(specifier)} requires an absolute packageRoot`);
+    }
     if (typeof materialize !== "function") {
       throw new TypeError(`Module ${JSON.stringify(specifier)} has no materialize function`);
     }
@@ -29,6 +34,7 @@ export class ModuleRegistry {
     }
     const captured: Module = {
       specifier,
+      packageRoot: resolve(packageRoot),
       ...(description === undefined ? {} : { description }),
       materialize: materialize.bind(module),
     };

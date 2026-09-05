@@ -27,6 +27,8 @@ Remove `NodeTypeScriptExecutor` and its type names entirely. No compatibility al
 
 ## Relationship to Prior Decisions
 
+The later [Decision 0004](0004-model-discovery-and-execution.md) supersedes this decision's declaration-retrieval API: discovery returns stable package paths, and the model-facing surface is `listModules` and `execute`.
+
 Decision 0002 remains the historical basis for subprocess lifecycle, strict JSON behavior in the TSFunc flavor, independent cwd/resolution roots, regular-file capture, physical packages, and removal of parent callbacks. This decision supersedes only its assumption of one public JSON execution flavor and one compiled bootstrap.
 
 Decision 0001 remains historical. Its package-native conclusion continues to apply equally to both flavors; its specialized bridge was already superseded by Decision 0002.

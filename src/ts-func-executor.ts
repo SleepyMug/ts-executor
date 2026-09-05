@@ -4,7 +4,6 @@ import { runTSFuncProcess } from "./runtime/run-ts-func.js";
 import type {
   CheckRequest,
   CheckResult,
-  DeclarationTree,
   ExecutorOptions,
   JsonValue,
   ListModulesRequest,
@@ -24,12 +23,12 @@ export class TSFuncExecutor {
     this.modules = this.#core.modules;
   }
 
-  async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
-    return this.#core.listModules(request);
+  getInstructions(): string {
+    return this.#core.getInstructions();
   }
 
-  async getTypes(requested: string): Promise<DeclarationTree> {
-    return this.#core.getTypes(requested);
+  async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
+    return this.#core.listModules(request);
   }
 
   async check(request: CheckRequest): Promise<CheckResult> {

@@ -1,12 +1,12 @@
 # Architecture
 
-> Two public execution flavors compose one catalog/check/workspace core and one neutral subprocess primitive over a shared physical package graph.
+> Two public execution flavors compose shared agent guidance and one catalog/check/workspace core with a neutral subprocess primitive over a shared physical package graph.
 
 ## Overview
 
-`TSFuncExecutor` and `ProcExecutor` each own a small internal `ExecutorCore` by composition; there is no public or internal executor base class. The core owns the module registry and coordinates immutable operation snapshots, module listing, declaration retrieval, strict checking, cwd validation, common workspace preparation, and cleanup. Public flavor classes delegate those shared operations and supply only their execution-specific preparation and interpretation.
+`TSFuncExecutor` and `ProcExecutor` each own a small internal `ExecutorCore` by composition; there is no public or internal executor base class. The core owns the module registry and coordinates immutable operation snapshots, deterministic agent-instruction assembly, module listing, strict checking, cwd validation, common workspace preparation, and cleanup. Public flavor classes delegate those shared operations and supply only their execution-specific preparation and interpretation. The model-facing surface is `listModules` and `execute`; harness code uses registration, `check`, and `getInstructions`. Agent instructions describe only discovery and execution with the selected executor's contract.
 
-A common workspace below `resolutionRoot` contains `main.ts`, `tsconfig.json`, package metadata, module materialization space, and the physical `node_modules` graph. Declaration retrieval resolves a package entry or exported subpath with TypeScript's NodeNext resolver and traverses transitive package-owned declaration files. Checking uses strict ES2022, Node-only NodeNext options against the same graph.
+`listModules` returns captured metadata with a stable absolute `packageRoot` for each package. The model reads `package.json` and declarations through filesystem access supplied by the harness. Discovery performs no materialization or declaration traversal. A common workspace below `resolutionRoot` contains `main.ts`, `tsconfig.json`, package metadata, module materialization space, and the physical `node_modules` graph. Checking uses strict ES2022, Node-only NodeNext options against the same graph.
 
 Execution opens private regular stdout/stderr files and calls one neutral primitive that spawns `process.execPath` with the executor-owned `tsx` preload, a selected compiled bootstrap, and absolute operation paths. The primitive returns exit code, signal, stdout, and stderr without interpreting flavor status. Separate host runners and compiled bootstraps implement the two contracts:
 
@@ -19,8 +19,9 @@ Both bootstraps flush direct-child output, atomically publish their flavor envel
 
 ```text
 TSFuncExecutor ─┐
-                ├─> ExecutorCore ─> registry/materializers ─> physical package graph
-ProcExecutor ───┘        ├───────> TypeScript NodeNext resolver/compiler
+                ├─> ExecutorCore ─> agent-instruction segments
+ProcExecutor ───┘        ├───────> registry/materializers ─> physical package graph
+                         ├───────> TypeScript NodeNext resolver/compiler
                          └───────> common workspace lifecycle
 
 TSFuncExecutor ─> TSFunc host runner ─┐
@@ -47,7 +48,7 @@ Programs are one source string exporting synchronous or asynchronous `main`. The
 
 ## Sub-documents
 
-- [Executor component](components/executor/index.md) — `TSFuncExecutor` and `ProcExecutor` compose shared catalog, checking, workspace, cwd, and cleanup orchestration while enforcing separate execution contracts.
+- [Executor component](components/executor/index.md) — `TSFuncExecutor` and `ProcExecutor` provide agent guidance and compose shared catalog, checking, workspace, cwd, and cleanup orchestration while enforcing separate execution contracts.
 - [Modules component](components/modules/index.md) — Modules expose existing declaration-bearing packages through ordinary ESM imports.
 - [Runtime component](components/runtime/index.md) — A neutral spawn primitive supports separate JSON-function and stdout-process bootstraps and host-side interpreters.
 - [Host-subprocess execution boundary](boundaries/host-subprocess-execution.md) — Common process lifecycle and regular-file output capture carry separate private TSFunc result and Proc status protocols.

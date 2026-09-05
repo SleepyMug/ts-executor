@@ -6,7 +6,6 @@ export { TSFuncExecutor } from "./ts-func-executor.js";
 export type {
   CheckRequest,
   CheckResult,
-  DeclarationTree,
   Diagnostic,
   DiagnosticCategory,
   ExecutorOptions,

@@ -9,7 +9,6 @@ export interface PreparedWorkspace {
   readonly tsconfig: string;
   readonly stdout: string;
   readonly stderr: string;
-  readonly packageRoots: ReadonlyMap<string, string>;
 }
 
 function attachCleanupError(primary: unknown, cleanup: unknown): void {
@@ -99,7 +98,6 @@ export async function prepareWorkspace(
       ),
     ]);
 
-    const packageRoots = new Map<string, string>();
     for (const [index, module] of modules.entries()) {
       const materializationRoot = join(root, ".modules", String(index));
       const materialized = await module.materialize(
@@ -111,7 +109,6 @@ export async function prepareWorkspace(
       const link = join(root, "node_modules", ...module.specifier.split("/"));
       await mkdir(dirname(link), { recursive: true });
       await symlink(packageRoot, link, process.platform === "win32" ? "junction" : "dir");
-      packageRoots.set(module.specifier, packageRoot);
     }
 
     return Object.freeze({
@@ -120,7 +117,6 @@ export async function prepareWorkspace(
       tsconfig,
       stdout: join(root, "stdout.log"),
       stderr: join(root, "stderr.log"),
-      packageRoots,
     });
   } catch (error) {
     try {

@@ -115,6 +115,8 @@ test("the packed public package has the intended files, declarations, and consum
         "packageModule",
       ]);
       const tsFunc = new api.TSFuncExecutor({ resolutionRoot: process.cwd() });
+      assert.equal("getTypes" in tsFunc, false);
+      assert.match(tsFunc.getInstructions(), /JSON function execution/);
       const result = await tsFunc.execute({
         source: "export function main(input: number): number { return input + 1; }",
         cwd: process.cwd(),
@@ -122,6 +124,8 @@ test("the packed public package has the intended files, declarations, and consum
       });
       assert.equal(result.value, 5);
       const proc = new api.ProcExecutor({ resolutionRoot: process.cwd() });
+      assert.equal("getTypes" in proc, false);
+      assert.match(proc.getInstructions(), /Stdout process execution/);
       assert.equal(await proc.execute({
         source: "export function main(): void { process.stdout.write('exact'); }",
         cwd: process.cwd(),
@@ -141,10 +145,10 @@ test("the packed public package has the intended files, declarations, and consum
         TypeCheckError,
         packageModule,
         type CheckResult,
-        type DeclarationTree,
         type ExecutorOptions,
         type JsonValue,
         type Module,
+        type ModuleSummary,
         type ProcExecuteRequest,
         type TSFuncExecuteRequest,
         type TSFuncExecuteResult,
@@ -154,20 +158,25 @@ test("the packed public package has the intended files, declarations, and consum
       const executor = new TSFuncExecutor(options);
       const proc = new ProcExecutor(options);
       const sameRegistryType: typeof executor.modules = proc.modules;
-      const declarations: DeclarationTree = {
-        entrypoint: "index.d.ts",
-        files: { "index.d.ts": "export interface Smoke {}" },
-      };
       const module: Module = packageModule({
         specifier: "@fixture/smoke",
         root: ".",
       });
       const json: JsonValue = { okay: true };
       void executor;
-      void declarations;
       void json;
       void module;
       void sameRegistryType;
+      const instructions: string = executor.getInstructions();
+      const procInstructions: string = proc.getInstructions();
+      const modules: Promise<readonly ModuleSummary[]> = executor.listModules();
+      const procModules: Promise<readonly ModuleSummary[]> = proc.listModules({ query: "smoke" });
+      void modules.then((entries) => entries.map((entry): string => entry.packageRoot));
+      void procModules;
+      // @ts-expect-error Declaration retrieval has been removed from both executors.
+      void executor.getTypes("@fixture/smoke");
+      // @ts-expect-error Declaration retrieval has been removed from both executors.
+      void proc.getTypes("@fixture/smoke");
       const checked: Promise<CheckResult> = executor.check({ source: "export function main() {}" });
       const tsFuncRequest: TSFuncExecuteRequest<number> = {
         source: "export function main(input: number) { return input; }",
@@ -198,6 +207,8 @@ test("the packed public package has the intended files, declarations, and consum
       void errorSignal;
       void checked;
       void executed;
+      void instructions;
+      void procInstructions;
       void stdout;
       void ProcExecutionError;
       void TypeCheckError;

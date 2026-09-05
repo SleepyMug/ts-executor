@@ -38,8 +38,7 @@ try {
     description: "A declaration-bearing network client fixture.",
   }));
 
-  const declarations = await executor.getTypes("@example/counter-client");
-  console.log("Client declaration entrypoint:", declarations.entrypoint);
+  console.log("Client modules:", await executor.listModules());
 
   const source = `
     import { createCounterClient } from "@example/counter-client";

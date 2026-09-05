@@ -1,17 +1,15 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { instructionsFor } from "./agent-instructions.js";
 import { checkWorkspace } from "./check.js";
-import { declarationTree } from "./declarations.js";
 import { TypeCheckError } from "./errors.js";
 import { ModuleRegistry } from "./registry.js";
 import type {
   CheckRequest,
   CheckResult,
-  DeclarationTree,
   ExecutorOptions,
   ListModulesRequest,
-  Module,
   ModuleSummary,
 } from "./types.js";
 import { prepareWorkspace, removeWorkspace, type PreparedWorkspace } from "./workspace.js";
@@ -22,12 +20,6 @@ interface SharedExecuteRequest {
   readonly source: string;
   readonly cwd: string | URL;
   readonly check?: boolean;
-}
-
-function owningModule(modules: readonly Module[], requested: string): Module | undefined {
-  return modules
-    .filter((module) => requested === module.specifier || requested.startsWith(`${module.specifier}/`))
-    .sort((left, right) => right.specifier.length - left.specifier.length)[0];
 }
 
 function attachCleanupError(primary: unknown, cleanup: unknown): void {
@@ -112,10 +104,16 @@ async function executionCwd(value: string | URL | undefined): Promise<string> {
 
 export class ExecutorCore {
   readonly modules = new ModuleRegistry();
+  readonly #instructions: string;
   readonly #resolutionRoot: string;
 
-  constructor(options: ExecutorOptions, executorName: string) {
+  constructor(options: ExecutorOptions, executorName: "TSFuncExecutor" | "ProcExecutor") {
+    this.#instructions = instructionsFor(executorName);
     this.#resolutionRoot = resolutionRootPath(options?.resolutionRoot, executorName);
+  }
+
+  getInstructions(): string {
+    return this.#instructions;
   }
 
   async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
@@ -129,23 +127,11 @@ export class ExecutorCore {
       .map((module) =>
         Object.freeze({
           specifier: module.specifier,
+          packageRoot: module.packageRoot,
           ...(module.description === undefined ? {} : { description: module.description }),
         }),
       );
     return Object.freeze(summaries);
-  }
-
-  async getTypes(requested: string): Promise<DeclarationTree> {
-    if (typeof requested !== "string" || requested.length === 0) {
-      throw new TypeError("getTypes requires a module specifier");
-    }
-    const snapshot = this.modules.snapshot();
-    const owner = owningModule(snapshot, requested);
-    if (owner === undefined) {
-      throw new Error(`No registered module owns ${JSON.stringify(requested)}`);
-    }
-    const workspace = await prepareWorkspace(this.#resolutionRoot, snapshot, "export {};\n");
-    return withWorkspace(workspace, async () => declarationTree(workspace, requested, owner.specifier));
   }
 
   async check(request: CheckRequest): Promise<CheckResult> {

@@ -24,4 +24,7 @@ test("the TS function and stdout process examples run end to end", async () => {
   assert.match(stdout, /value: 5, clientInstance: 1/u);
   assert.match(stdout, /4\) Stdout process execution/u);
   assert.match(stdout, /exact stdout from ProcExecutor/u);
+  assert.match(stdout, /5\) Agent harness adapter/u);
+  assert.match(stdout, /Model tools: listModules, execute/u);
+  assert.match(stdout, /Corrected tool result: 5/u);
 });

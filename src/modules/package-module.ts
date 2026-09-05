@@ -12,6 +12,7 @@ export function packageModule(options: PackageModuleOptions): Module {
 
   return Object.freeze({
     specifier,
+    packageRoot,
     ...(description === undefined ? {} : { description }),
     async materialize() {
       let rootStat;
