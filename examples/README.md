@@ -31,6 +31,8 @@ node examples/06-host-module.mjs
 
 The adapter is example harness code for either executor. It exposes only `listModules` and `execute`, validates their JSON arguments, keeps checking enabled under harness control, and maps results and errors to `{ isError, content }` responses. The `content` string holds JSON for module lists, TSFunc results, and errors, or exact stdout for Proc success. Register the definitions using your harness's tool protocol and preserve the error flag when delivering responses to the model. The example assumes filesystem tools can read the listed package roots. It does not depend on a particular model provider or SDK.
 
+Human-readable console logs can contain ANSI colors when `FORCE_COLOR` is enabled, even in captured output. Examples that require exact stdout use explicitly formatted `process.stdout.write` strings instead of numeric/object console inspection. The example regression suite runs with colors both disabled and forced, normalizing ANSI only when checking human-readable logs; the executor's returned output remains unchanged.
+
 ## Fixtures
 
 - [`fixtures/geometry-package/`](fixtures/geometry-package/) is a real package with root and subpath exports plus a transitive declaration file.

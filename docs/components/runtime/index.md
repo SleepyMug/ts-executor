@@ -14,7 +14,7 @@ Flavor-specific host runners choose distinct compiled JavaScript bootstraps and 
 
 - `runSubprocess(workspace, cwd, bootstrap, arguments): Promise<SubprocessResult>` — internal primitive that opens output files, starts one direct child without a shell, attaches an optional host bridge, waits for its `exit`, closes parent handles, reads both output files, and returns `exitCode`, `signal`, `stdout`, `stderr`, and any startup/output or handle-close failures. It never interprets a flavor status envelope. Spawn failures have no child to reap; errors after a successful spawn are recorded but do not release files or module leases before the child's exit.
 - Freshness invariant — every call starts and reaps a distinct process, so globals, singleton state, ESM module instances, and package clients do not survive execution.
-- Output contract — fd 1 and fd 2 are mode-`0o600` private regular files rather than inherited pipes. Writes flushed by the direct child before publication are included. Descendant writes racing direct-child exit may or may not be observed and never delay the host's wait.
+- Output contract — fd 1 and fd 2 are mode-`0o600` private regular files rather than inherited pipes. Writes flushed by the direct child before publication are included. Descendant writes racing direct-child exit may or may not be observed and never delay the host's wait. ANSI color escapes are preserved, not stripped; inherited `FORCE_COLOR` can affect console inspection even with file-backed stdout. Use explicit string writes for deterministic machine output; see the [forced-color finding](../../experiment_journal/node-child-process-files.md#2026-09-14-forced-console-colors-survive-regular-file-stdout-capture).
 
 ### TSFunc runtime
 

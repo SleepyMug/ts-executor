@@ -65,3 +65,22 @@ A bootstrap can terminally flush these private execution streams with one captur
 ### References
 
 - [Node.js `writable.end()`](https://nodejs.org/api/stream.html#writableendchunk-encoding-callback)
+
+## 2026-09-14: Forced console colors survive regular-file stdout capture
+
+### Context
+
+An example that expected exact numeric stdout passed without color settings but failed when launched with `FORCE_COLOR=1`. The child inherits the host environment even though its stdout descriptor is a regular file rather than a terminal.
+
+### Finding
+
+On Node v24.15.0, Linux x64, `console.log(5)` under `FORCE_COLOR=1` emitted `"\u001b[33m5\u001b[39m\n"` into the captured stdout file. The numeric value is formatted through console inspection, which honors forced colors despite non-TTY output. `process.stdout.write(String(5) + "\n")` instead emitted exactly `"5\n"`. Human-readable object and numeric logs in the parent process were colored as well.
+
+### Implications
+
+Do not strip colors in the executor or override the inherited environment to make an example's assertion pass: exact capture must preserve what guest code emits. Programs requiring deterministic text should write explicitly formatted strings. Tests of human-readable example logs can normalize ANSI presentation separately and exercise both `FORCE_COLOR=0` and `FORCE_COLOR=1`.
+
+### References
+
+- [Node.js FORCE_COLOR environment variable](https://nodejs.org/api/cli.html#force_color1-2-3)
+- [Node.js console](https://nodejs.org/api/console.html)

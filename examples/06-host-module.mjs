@@ -46,7 +46,10 @@ try {
     cwd: resolutionRoot,
     source: `
       import { increment } from "@host/counter";
-      export async function main() { console.log(await increment({ amount: 1 })); }
+      export async function main() {
+        // Write explicit text: console inspection may color numbers under FORCE_COLOR.
+        process.stdout.write(String(await increment({ amount: 1 })) + "\\n");
+      }
     `,
   });
   assert.equal(stdout, "5\n");
