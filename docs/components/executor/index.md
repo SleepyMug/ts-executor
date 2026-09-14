@@ -4,7 +4,7 @@
 
 ## Overview
 
-Each public executor owns an internal `ExecutorCore`; neither inherits from a public base class. The core owns a mutable module registry, but registration captures fixed discovery metadata and every catalog, checking, or execution operation captures a frozen ordered snapshot before asynchronous work begins. It also holds deterministic agent guidance assembled from shared text segments and one flavor-specific segment. Common workspaces are private directories below `resolutionRoot` and are removed when an operation settles. Execution requires an independent absolute working directory.
+Each public executor owns an internal `ExecutorCore`; neither inherits from a public base class. The core owns a mutable module registry, but registration captures fixed discovery metadata and every catalog, checking, or execution operation captures a frozen ordered snapshot before asynchronous work begins. It also holds deterministic agent guidance assembled from shared text segments and one flavor-specific segment. Common workspaces are private directories at `resolutionRoot/.ts-executor/runs/run-<unique>/` and are removed when an operation settles. Generated host packages live independently until their module handles are disposed. Shared directory scaffolding is retained. Execution requires an independent absolute working directory.
 
 ## Provided APIs
 
@@ -21,12 +21,12 @@ The [harness adapter example](../../../examples/harness-adapter.mjs) supplies JS
 
 - `new TSFuncExecutor({ resolutionRoot })` and `new ProcExecutor({ resolutionRoot })` — create separate executors. `resolutionRoot` is a non-empty path string or local `file:` URL. Relative strings resolve against the constructor call's host working directory. Operations reject a missing or non-directory root. The root controls workspace placement, ambient package ancestry, checking, and runtime ESM resolution; it is not the guest working directory.
 - `executor.getInstructions(): string` — synchronously returns deterministic Markdown describing only how to use `listModules` and `execute`, including inspection of package files and the selected executor's execution contract. It performs no filesystem or module operation and embeds no catalog state or harness API instructions.
-- `executor.modules.register(module): void` — adds one exact package specifier and rejects duplicates, invalid package names, missing or non-absolute discovery roots, or missing materializers. Registry changes affect only later snapshots.
-- `executor.modules.snapshot(): readonly Module[]` — returns a frozen ordered copy whose membership and discovery metadata cannot be altered by later registration. Module-owned external state remains outside this immutability guarantee.
+- `executor.modules.register(module): void` — adds one exact package specifier and rejects duplicates, invalid package names, missing or non-absolute discovery roots, or missing materializers. Registry changes affect only later snapshots. Host-module dispatch capabilities survive metadata capture; registering a disposing/disposed host module rejects.
+- `executor.modules.snapshot(): readonly Module[]` — returns a frozen ordered copy whose membership and discovery metadata cannot be altered by later registration. Module-owned external state remains outside this immutability guarantee. Checks and executions acquire leases on captured host modules synchronously before awaiting anything; disposing modules reject new operations. Existing leases remain valid until run cleanup completes.
 - `executor.check({ source }): Promise<CheckResult>` — checks one `main.ts` with strict ES2022, Node-only, no-emit NodeNext settings and returns stable, one-based diagnostics.
 - `ExecutorOptions` — `{ readonly resolutionRoot: string | URL }`, shared by both constructors.
 - `TypeCheckError` — thrown by either checked execution when `check` returns errors; exposes the immutable diagnostics array.
-- `ModuleSummary` — `{ readonly specifier: string; readonly packageRoot: string; readonly description?: string }`. Discovery roots belong to the module and remain readable between operations; they are not temporary executor workspaces.
+- `ModuleSummary` — `{ readonly specifier: string; readonly packageRoot: string; readonly description?: string }`. Discovery roots belong to the module and remain readable between operations during its lifetime; they are not temporary executor workspaces. `hostModule.dispose()` ends that lifetime, and listing an executor containing a closing host module rejects.
 
 Both `execute` methods require `cwd` as an absolute native path string or query- and fragment-free local `file:` URL naming an existing directory. Both check by default and skip checking only when `check === false`.
 
@@ -47,7 +47,7 @@ Both `execute` methods require `cwd` as an absolute native path string or query-
 
 ## Consumed APIs
 
-- [Package materialization](../modules/index.md#provided-apis) — builds the physical package graph for a registry snapshot.
+- [Package materialization and host-module lifecycle](../modules/index.md#provided-apis) — builds the physical package graph for a registry snapshot and keeps generated packages alive through operation leases. Arbitrary custom materializers retain per-operation semantics; only generated host artifacts are reused.
 - [Fresh subprocess execution](../runtime/index.md#provided-apis) — supplies neutral process capture plus separate TSFunc and Proc protocols.
 - [Host-subprocess execution boundary](../../boundaries/host-subprocess-execution.md) — constrains file modes, arguments, flavor envelopes, output, errors, and lifecycle.
 - [TypeScript compiler API](https://github.com/microsoft/TypeScript/wiki/Using-the-Compiler-API) — performs NodeNext resolution and diagnostics.
@@ -63,13 +63,13 @@ Both `execute` methods require `cwd` as an absolute native path string or query-
 
 ### Check or execute source
 
-1. The core captures a registry snapshot. TSFunc also strictly validates and encodes optional input before asynchronous work.
+1. The core captures a registry snapshot and synchronously acquires its host-module leases. TSFunc also strictly validates and encodes optional input before asynchronous work. Failure at any stage releases every acquired lease.
 2. For execution, the core validates and normalizes required `cwd` independently from `resolutionRoot`.
-3. It materializes every package into a common workspace below `resolutionRoot` and writes common source/configuration/package files. If parallel initialization fails, every sibling filesystem operation settles before cleanup begins.
+3. It materializes every package into a new run workspace below `resolutionRoot/.ts-executor/runs/` and writes common source/configuration/package files. Each run has its own node_modules links to the captured roots, including unchanged generated host packages. If parallel initialization fails, every sibling filesystem operation settles before cleanup begins.
 4. The core runs strict NodeNext diagnostics. Execution proceeds unless diagnostics fail or `check === false`.
-5. The flavor runner creates only its needed private paths/files and calls the neutral spawn primitive with its own compiled bootstrap.
+5. The flavor runner creates only its needed private paths/files and calls the neutral spawn primitive with its own compiled bootstrap. If the captured graph includes host modules, an execution-scoped IPC channel dispatches validated calls to those captured handlers; otherwise no IPC channel is opened.
 6. The flavor interpreter returns a JSON composite or stdout string, or reconstructs the contract-specific runtime error.
-7. A `finally` path removes the complete operation directory. If cleanup also fails during a primary operation failure, the primary failure is preserved with best-effort `cleanupError` metadata.
+7. A `finally` path removes the complete operation directory, then releases module leases. Shared artifacts are not deleted by run cleanup. If cleanup also fails during a primary operation failure, the primary failure is preserved with best-effort `cleanupError` metadata. A post-spawn IPC error does not shorten direct-child ownership: cleanup still waits for child exit.
 
 ## Execution-context Constraints
 

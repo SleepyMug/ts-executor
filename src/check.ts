@@ -36,7 +36,7 @@ function formatDiagnostic(workspace: PreparedWorkspace, value: ts.Diagnostic): D
 export function checkWorkspace(workspace: PreparedWorkspace): CheckResult {
   const program = ts.createProgram({
     rootNames: [workspace.entrypoint],
-    options: compilerOptions(workspace.root),
+    options: compilerOptions(workspace.root, workspace.resolutionRoot),
   });
   const diagnostics = ts
     .getPreEmitDiagnostics(program)

@@ -1,6 +1,6 @@
 {
-  "name": "ts-executor",
-  "version": "0.3.0",
+  "name": "@sleepymug/ts-executor",
+  "version": "0.1.0",
   "description": "Execute checked TypeScript as JSON functions or stdout processes in fresh Node subprocesses.",
   "type": "module",
   "exports": {
@@ -35,7 +35,9 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@sinclair/typebox": "^0.34.52",
     "@types/node": "^18.19.0",
+    "json-schema-to-typescript": "^15.0.4",
     "tsx": "^4.23.1",
     "typescript": "^5.9.3"
   }

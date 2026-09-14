@@ -15,6 +15,7 @@ node examples/02-package-module.mjs
 node examples/03-network-client-package.mjs
 node examples/04-process-stdout.mjs
 node examples/05-agent-harness.mjs
+node examples/06-host-module.mjs
 ```
 
 ## Samples
@@ -26,6 +27,7 @@ node examples/05-agent-harness.mjs
 | [`03-network-client-package.mjs`](03-network-client-package.mjs) | Using a declaration-bearing network client as a plain package and constructing it independently in each fresh subprocess. Generated Connect clients use the same pattern. |
 | [`04-process-stdout.mjs`](04-process-stdout.mjs) | `ProcExecutor` running a no-argument `main()` and returning its exact stdout string. |
 | [`05-agent-harness.mjs`](05-agent-harness.mjs) | JSON tool definitions and dispatch, filesystem inspection, type-error feedback, and corrected execution using [`harness-adapter.mjs`](harness-adapter.mjs). |
+| [`06-host-module.mjs`](06-host-module.mjs) | Schema-defined host closures, persistent host state, declaration reuse across checks and both flavors, and explicit module disposal. |
 
 The adapter is example harness code for either executor. It exposes only `listModules` and `execute`, validates their JSON arguments, keeps checking enabled under harness control, and maps results and errors to `{ isError, content }` responses. The `content` string holds JSON for module lists, TSFunc results, and errors, or exact stdout for Proc success. Register the definitions using your harness's tool protocol and preserve the error flag when delivering responses to the model. The example assumes filesystem tools can read the listed package roots. It does not depend on a particular model provider or SDK.
 

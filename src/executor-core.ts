@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { instructionsFor } from "./agent-instructions.js";
 import { checkWorkspace } from "./check.js";
 import { TypeCheckError } from "./errors.js";
+import { acquireHostModules, assertHostModulesOpen } from "./host-bindings.js";
 import { ModuleRegistry } from "./registry.js";
 import type {
   CheckRequest,
@@ -118,6 +119,7 @@ export class ExecutorCore {
 
   async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
     const snapshot = this.modules.snapshot();
+    assertHostModulesOpen(snapshot);
     const query = request?.query?.trim().toLowerCase();
     const summaries = snapshot
       .filter((module) => {
@@ -136,8 +138,13 @@ export class ExecutorCore {
 
   async check(request: CheckRequest): Promise<CheckResult> {
     const snapshot = this.modules.snapshot();
-    const workspace = await prepareWorkspace(this.#resolutionRoot, snapshot, request.source);
-    return withWorkspace(workspace, async () => checkWorkspace(workspace));
+    const host = acquireHostModules(snapshot);
+    try {
+      const workspace = await prepareWorkspace(this.#resolutionRoot, snapshot, request.source, host.bindings);
+      return await withWorkspace(workspace, async () => checkWorkspace(workspace));
+    } finally {
+      host.release();
+    }
   }
 
   async execute<State, Result>(
@@ -146,15 +153,20 @@ export class ExecutorCore {
     operation: (workspace: PreparedWorkspace, cwd: string, state: State) => Promise<Result>,
   ): Promise<Result> {
     const snapshot = this.modules.snapshot();
-    const state = captureFlavorState();
-    const cwd = await executionCwd(request.cwd);
-    const workspace = await prepareWorkspace(this.#resolutionRoot, snapshot, request.source);
-    return withWorkspace(workspace, async () => {
-      if (request.check !== false) {
-        const checked = checkWorkspace(workspace);
-        if (!checked.ok) throw new TypeCheckError(checked.diagnostics);
-      }
-      return operation(workspace, cwd, state);
-    });
+    const host = acquireHostModules(snapshot);
+    try {
+      const state = captureFlavorState();
+      const cwd = await executionCwd(request.cwd);
+      const workspace = await prepareWorkspace(this.#resolutionRoot, snapshot, request.source, host.bindings);
+      return await withWorkspace(workspace, async () => {
+        if (request.check !== false) {
+          const checked = checkWorkspace(workspace);
+          if (!checked.ok) throw new TypeCheckError(checked.diagnostics);
+        }
+        return operation(workspace, cwd, state);
+      });
+    } finally {
+      host.release();
+    }
   }
 }

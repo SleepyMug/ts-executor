@@ -1,10 +1,14 @@
 import { chmod, mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { runtimeCompilerOptions } from "./compiler-options.js";
+import type { HostBinding } from "./host-bindings.js";
+import { storageDirectory } from "./storage.js";
 import type { Module } from "./types.js";
 
 export interface PreparedWorkspace {
   readonly root: string;
+  readonly resolutionRoot: string;
+  readonly hostBindings: ReadonlyMap<string, HostBinding>;
   readonly entrypoint: string;
   readonly tsconfig: string;
   readonly stdout: string;
@@ -40,18 +44,6 @@ async function waitForAll(tasks: readonly Promise<unknown>[]): Promise<void> {
   if (failed) throw firstFailure;
 }
 
-async function assertResolutionRoot(resolutionRoot: string): Promise<void> {
-  let rootStat;
-  try {
-    rootStat = await stat(resolutionRoot);
-  } catch (error) {
-    throw new Error(`resolutionRoot does not exist: ${JSON.stringify(resolutionRoot)}`, { cause: error });
-  }
-  if (!rootStat.isDirectory()) {
-    throw new Error(`resolutionRoot is not a directory: ${JSON.stringify(resolutionRoot)}`);
-  }
-}
-
 async function assertPackageRoot(specifier: string, packageRoot: string): Promise<void> {
   let packageStat;
   try {
@@ -72,11 +64,12 @@ export async function prepareWorkspace(
   resolutionRootInput: string,
   modules: readonly Module[],
   source: string,
+  hostBindings: ReadonlyMap<string, HostBinding> = new Map(),
 ): Promise<PreparedWorkspace> {
   if (typeof source !== "string") throw new TypeError("TypeScript source must be a string");
   const resolutionRoot = resolve(resolutionRootInput);
-  await assertResolutionRoot(resolutionRoot);
-  const root = await mkdtemp(join(resolutionRoot, ".ts-executor-run-"));
+  const runs = await storageDirectory(resolutionRoot, "runs");
+  const root = await mkdtemp(join(runs, "run-"));
 
   try {
     await chmod(root, 0o700);
@@ -113,6 +106,8 @@ export async function prepareWorkspace(
 
     return Object.freeze({
       root,
+      resolutionRoot,
+      hostBindings,
       entrypoint,
       tsconfig,
       stdout: join(root, "stdout.log"),

@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import type { Module } from "./types.js";
+import { assertHostModulesOpen, copyHostBinding } from "./host-bindings.js";
 
 const PACKAGE_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 
@@ -18,6 +19,7 @@ export class ModuleRegistry {
   readonly #modules = new Map<string, Module>();
 
   register(module: Module): void {
+    assertHostModulesOpen([module]);
     const specifier = module.specifier;
     const packageRoot = module.packageRoot;
     const description = module.description;
@@ -39,6 +41,7 @@ export class ModuleRegistry {
       materialize: materialize.bind(module),
     };
     Object.freeze(captured);
+    copyHostBinding(module, captured);
     this.#modules.set(specifier, captured);
   }
 

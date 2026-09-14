@@ -33,7 +33,7 @@ test("workspace initialization settles sibling writes before cleanup and preserv
   fsPromises.writeFile = async (path, ...args) => {
     const target = String(path);
     const parent = dirname(target);
-    if (basename(parent).startsWith(".ts-executor-run-")) {
+    if (basename(dirname(parent)) === "runs" && basename(parent).startsWith("run-")) {
       operationRoot ??= parent;
       if (basename(target) === "package.json") throw initializationFailure;
       if (basename(target) === "main.ts") {

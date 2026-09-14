@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { open, readFile, type FileHandle } from "node:fs/promises";
 import { createRequire } from "node:module";
 import type { PreparedWorkspace } from "../workspace.js";
+import { attachHostBridge } from "./host-bridge.js";
 
 export interface SubprocessResult {
   readonly exitCode: number | null;
@@ -41,15 +42,20 @@ function environment(workspace: PreparedWorkspace): NodeJS.ProcessEnv {
 function waitForExit(child: ChildProcess): Promise<ExitOutcome> {
   return new Promise((resolve) => {
     let settled = false;
-    child.once("error", (error) => {
+    let processError: Error | undefined;
+    child.on("error", (error) => {
       if (settled) return;
+      processError ??= error;
+      // A failed spawn has no process to reap. IPC errors after a successful
+      // spawn do NOT mean the child exited: retain files and leases until exit.
+      if (child.pid !== undefined) return;
       settled = true;
       resolve({ exitCode: null, signal: null, error });
     });
     child.once("exit", (exitCode, signal) => {
       if (settled) return;
       settled = true;
-      resolve({ exitCode, signal });
+      resolve({ exitCode, signal, ...(processError === undefined ? {} : { error: processError }) });
     });
   });
 }
@@ -94,6 +100,7 @@ export async function runSubprocess(
 ): Promise<SubprocessResult> {
   const handles: FileHandle[] = [];
   let outcome: ExitOutcome = { exitCode: null, signal: null };
+  let closeBridge: (() => void) | undefined;
   try {
     handles.push(await open(workspace.stdout, "w", 0o600));
     handles.push(await open(workspace.stderr, "w", 0o600));
@@ -103,9 +110,19 @@ export async function runSubprocess(
       {
         cwd,
         env: environment(workspace),
-        stdio: ["ignore", handles[0]?.fd ?? "ignore", handles[1]?.fd ?? "ignore"],
+        stdio: workspace.hostBindings.size === 0
+          ? ["ignore", handles[0]?.fd ?? "ignore", handles[1]?.fd ?? "ignore"]
+          : ["ignore", handles[0]?.fd ?? "ignore", handles[1]?.fd ?? "ignore", "ipc"],
+        serialization: "json",
       },
     );
+    if (workspace.hostBindings.size > 0) {
+      closeBridge = attachHostBridge(child, async (id, method, input, signal) => {
+        const binding = workspace.hostBindings.get(id);
+        if (binding === undefined) throw new Error("Host module is not registered for this execution");
+        return binding.invoke(method, input, signal);
+      });
+    }
     outcome = await waitForExit(child);
   } catch (error) {
     outcome = {
@@ -113,6 +130,8 @@ export async function runSubprocess(
       signal: null,
       error: error instanceof Error ? error : new Error(String(error)),
     };
+  } finally {
+    closeBridge?.();
   }
 
   const cleanupError = await closeHandles(handles);

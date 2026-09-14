@@ -46,3 +46,26 @@ The child bootstrap should flush stdout and stderr before sending its terminal m
 
 - [Node.js `child_process.fork()`](https://nodejs.org/api/child_process.html#child_processforkmodulepath-args-options)
 - [Node.js TypeScript support and third-party loaders](https://nodejs.org/api/typescript.html)
+
+## 2026-09-12: JSON-text IPC coexists with file output and nested TypeScript entrypoints
+
+### Context
+
+The host-function bridge needs a per-child channel without replacing regular-file stdout/stderr, independent cwd, or terminal result files. Probes and integration tests ran on Node v24.15.0, Linux x64, with tsx 4.23.13 and TypeScript 5.9.3.
+
+### Finding
+
+- `spawn(process.execPath, ..., { stdio: ["ignore", stdoutFd, stderrFd, "ipc"], serialization: "json" })` exposed `child.send` and `process.send` while preserving regular-file output. Sending prevalidated JSON text as the message avoided rich-value serialization semantics.
+- Concurrent request IDs correlated out-of-order responses. Direct child disconnect and forced exit notified the parent while already-started parent promises remained ordinary host work; they were not canceled automatically.
+- Terminally disconnecting IPC before stream ending and file publication did not prevent TSFunc or Proc terminal files from being published and their children being reaped. An uncooperative parent callback need not delay child completion.
+- A main.ts nested under `.ts-executor/runs/<id>/`, with run-local node_modules symlinks to shared physical package roots, both checked and executed correctly. Explicitly supplying the original resolutionRoot's Node type directory preserved ambient Node declarations. Independent cwd and package realpath resolution continued to work.
+- Focused transport tests verified that a false `send()` return must be treated as queued backpressure, not as permission to retry. Callback errors and child error events are not evidence that an already-spawned child has exited; a separate direct-child exit wait is necessary before releasing files.
+
+### Implications
+
+The JSON host-call channel can remain separate from the existing result/output contracts. Keep per-run package links and explicitly retain ambient type lookup when adding directory depth. These observations do not establish support for the untested Node-major or Windows/macOS matrix, and Node's native IPC framing is not a language-neutral transport.
+
+### References
+
+- [Node.js child process send and error events](https://nodejs.org/api/child_process.html)
+- [Node.js ESM resolution](https://nodejs.org/api/esm.html#resolution-and-loading-algorithm)

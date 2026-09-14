@@ -4,7 +4,7 @@
 
 ## Overview
 
-Each execution owns one mode-`0o700` workspace below `resolutionRoot` and one direct Node subprocess whose native working directory is independently validated `execute.cwd`. There is no shell or message channel. Command arguments carry only executor-owned code and absolute operation paths. Common stdout/stderr files and raw process termination are flavor-neutral; private input/result/status files belong to a specific fixed bootstrap. This is a lifecycle and serialization boundary, not a security boundary.
+Each execution owns one mode-`0o700` workspace under `resolutionRoot/.ts-executor/runs/run-<unique>/` and one direct Node subprocess whose native working directory is independently validated `execute.cwd`. There is no shell. A captured graph containing host modules gets one additional IPC descriptor; otherwise there is no message channel. Generated host-package artifacts live independently under their owner's `resolutionRoot/.ts-executor/modules/` until explicit disposal. Command arguments carry only executor-owned code and absolute operation paths. Common stdout/stderr files and raw process termination are flavor-neutral; private input/result/status files belong to a specific fixed bootstrap. This is a lifecycle and serialization boundary, not a security boundary.
 
 ## Common Host-to-subprocess Contract
 
@@ -19,7 +19,7 @@ process.execPath \
 
 No submitted source or JSON value appears in an argument. The host passes normalized request `cwd` to `spawn`. Its environment copies the parent except that preload receives operation `TSX_TSCONFIG_PATH` and one private variable encodes the caller's original present/absent config plus any preexisting private value. Shared bootstrap support restores both before importing guest code.
 
-The neutral host primitive waits for direct-child `exit`, closes its output handles, reads both logs, and returns nullable exit code, nullable signal, stdout, and stderr. It does not read or classify a flavor envelope.
+The neutral host primitive waits for direct-child `exit`, closes its output handles, reads both logs, and returns nullable exit code, nullable signal, stdout, and stderr. A failed spawn has no child to reap; post-spawn IPC errors are recorded but do not permit early workspace cleanup or lease release. It does not read or classify a flavor envelope.
 
 ## TSFunc Protocol
 
@@ -72,7 +72,7 @@ Status 0 must pair with `{ ok: true }`; nonzero reported failure must pair with 
 
 ## Shared Terminal Publication
 
-Each flavor bootstrap captures stdout/stderr Writable terminal `end` capabilities and `process.exit` before guest import. After its call settles, it:
+Each flavor bootstrap captures stdout/stderr Writable terminal `end` capabilities and `process.exit` before guest import. After its call settles, it first closes the optional host client (rejecting pending calls and disconnecting without awaiting host work), then:
 
 1. invokes each captured terminal `end` capability once, fully uncorking and flushing prior direct-child writes without guest-shadowable cork counters;
 2. writes its complete envelope to the flavor's mode-`0o600` temporary path;
@@ -83,7 +83,7 @@ A guest-replaced `process.exit` or retained event-loop handle cannot retain a co
 
 ## JSON Data and Error Contracts
 
-`JsonValue` applies only to TSFunc input and successful value:
+`JsonValue` applies to TSFunc input/successful value and host-call arguments/results (including when used by Proc):
 
 ```ts
 type JsonValue =
@@ -113,12 +113,39 @@ Arbitrary thrown values are manually reduced to safe strings. Class identity and
 
 Spawn failure, signal exit, envelope/status mismatch, early exit, and missing, partial, or malformed envelope are runtime failures. TSFunc reconstructs its existing output-bearing `Error`. Proc normalizes every such post-start classification to `ProcExecutionError`; guest name/message/stack are retained when available. Failures before spawn—input, cwd, materialization, or checking—have no runtime output/termination contract, and checked execution throws `TypeCheckError`.
 
-The host owns workspace, direct child, output handles, and final reads. Bootstrap owns publication and direct-child flush ordering. The core removes the workspace in `finally`. Initialization waits for sibling filesystem operations to settle before cleanup; a secondary cleanup failure does not replace a primary error and may appear as best-effort `cleanupError` metadata.
+The host owns workspace, direct child, output handles, and final reads. The core acquires host-module leases synchronously with each operation snapshot and releases them only after workspace cleanup. Module disposal stops new leases and waits existing operations before removing its generated package; run cleanup never removes shared module artifacts. Bootstrap owns publication and direct-child flush ordering. The core removes the workspace in `finally`. Initialization waits for sibling filesystem operations to settle before cleanup; a secondary cleanup failure does not replace a primary error and may appear as best-effort `cleanupError` metadata.
 
 The executor does not kill or await guest-created descendants. Descendant bytes racing direct-child exit may be present or absent and cannot delay the wait. Direct-child bytes completed before bootstrap flush are guaranteed. Guest code can tamper with operation files and cleanup, so this is not adversarial isolation.
+
+## Host-call Protocol
+
+The generated proxy package contains a stable module identity and imports the executor-owned compiled guest client by absolute file URL. It contains no per-run endpoint. Run-local node_modules links select packages from the registry snapshot; the host dispatch table contains only the snapshot's captured module identities and function definitions. Host callbacks and closures never enter the child.
+
+When host modules are present, spawn uses `stdio: ["ignore", stdoutFd, stderrFd, "ipc"]` with `serialization: "json"`. IPC payloads are prevalidated JSON **text strings**, with exact envelope shapes:
+
+```ts
+type HostRequest = {
+  type: "ts-executor:host-request:v1";
+  id: number; // positive safe integer, unique for this child
+  moduleId: string;
+  method: string;
+  input: JsonValue;
+};
+type HostResponse =
+  | { type: "ts-executor:host-response:v1"; id: number; ok: true; value: JsonValue }
+  | { type: "ts-executor:host-response:v1"; id: number; ok: false; error: SerializedError };
+```
+
+The client and host strictly validate JSON before sending. The host additionally enforces each function's input/output schema, even with `check: false`. Values are detached JSON snapshots, not shared identities. Functions always return guest promises. Host errors preserve name/message/optional stack, not custom fields or class identity, and may be caught by guest code without failing the entire execution.
+
+Calls dispatch concurrently and may complete out of order. Repeated request IDs never replay side effects, including after an earlier response. `send() === false` is queued backpressure, not failure or a retry instruction; send callbacks report failures. Unknown modules/methods produce error replies. Invalid protocol JSON, wrong direction/version, malformed exact envelopes, duplicate IDs, or unexpected response IDs close the channel. Unrelated native messages and valid JSON without the protocol namespace are ignored. Node IPC framing is Node-specific, despite language-neutral JSON payloads.
+
+Closing/disconnecting stops new dispatch, aborts the shared host execution signal, and rejects guest pending promises. Eventual host rejections are observed and replies discarded after close. Main must await its host calls before returning: queued/unawaited effects are not guaranteed, and already-running handlers may continue after child exit or module disposal. Neither child failure nor disconnect rolls back effects. There are no retries, per-call deadlines, streaming, remote object handles, or forced host-work cancellation.
+
+Both bootstraps initialize the client before guest import and close it before terminal publication. The bridge does not change stdout/stderr semantics, require a listening server, or extend direct-child ownership to descendants. See the [IPC journal](../experiment_journal/node-child-process-ipc.md) for tested runtime behavior and [host functions](../components/host-functions/index.md#provided-apis) for the supported schema contract.
 
 ## Resolution and cwd
 
 The host requires `cwd` to be an absolute native path string or query- and fragment-free local `file:` URL naming an existing directory. `spawn({ cwd })` gives concurrent children independent native relative-path semantics, including child-local `process.chdir()`.
 
-The imported `main.ts` remains an absolute path below `resolutionRoot`. ESM and checking resolve linked operation packages first, ambient ancestors below `resolutionRoot` next, and linked-package dependencies from each package's real location. Changing `cwd` never redirects that package graph.
+The imported `main.ts` remains an absolute path below `resolutionRoot`. ESM and checking resolve linked operation packages first, ambient ancestors below `resolutionRoot` next, and linked-package dependencies from each package's real location. Changing `cwd` never redirects that package graph. Run-local package.json keeps main.ts in an ESM scope. Strict checking explicitly includes the original resolutionRoot's ambient Node type directory rather than assuming a workspace's immediate parent is the resolution root. Shared storage scaffolding is retained; only unique run directories are removed per operation.

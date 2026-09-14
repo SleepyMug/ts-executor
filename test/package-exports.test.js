@@ -111,7 +111,10 @@ test("the packed public package has the intended files, declarations, and consum
         "ProcExecutionError",
         "ProcExecutor",
         "TSFuncExecutor",
+        "Type",
         "TypeCheckError",
+        "hostFunction",
+        "hostModule",
         "packageModule",
       ]);
       const tsFunc = new api.TSFuncExecutor({ resolutionRoot: process.cwd() });
@@ -131,6 +134,19 @@ test("the packed public package has the intended files, declarations, and consum
         cwd: process.cwd(),
       }), "exact");
       assert.equal(typeof api.ProcExecutionError, "function");
+      const host = await api.hostModule({
+        resolutionRoot: process.cwd(), specifier: "@host/packed",
+        functions: { greet: api.hostFunction({
+          input: api.Type.String(), output: api.Type.String(), handler: name => "Hello " + name,
+        }) },
+      });
+      try {
+        tsFunc.modules.register(host);
+        assert.equal((await tsFunc.execute({
+          cwd: process.cwd(),
+          source: 'import { greet } from "@host/packed"; export async function main() { return greet("packed"); }',
+        })).value, "Hello packed");
+      } finally { await host.dispose(); }
     `,
   );
   await execFileAsync(process.execPath, [join(root, "smoke.mjs")], { cwd: root });
@@ -144,6 +160,13 @@ test("the packed public package has the intended files, declarations, and consum
         TSFuncExecutor,
         TypeCheckError,
         packageModule,
+        Type,
+        hostFunction,
+        hostModule,
+        type HostCallContext,
+        type HostFunction,
+        type HostModule,
+        type HostModuleOptions,
         type CheckResult,
         type ExecutorOptions,
         type JsonValue,
@@ -154,6 +177,21 @@ test("the packed public package has the intended files, declarations, and consum
         type TSFuncExecuteResult,
       } from "ts-executor";
 
+      const fn: HostFunction = hostFunction({
+        input: Type.Object({ id: Type.Number() }), output: Type.String(),
+        handler(input, context) {
+          const ctx: HostCallContext = context;
+          const id: number = input.id;
+          // @ts-expect-error input is inferred, not any
+          const bad: string = input.id;
+          return String(id);
+        },
+      });
+      const hostOptions: HostModuleOptions = {
+        resolutionRoot: ".", specifier: "@host/typed", functions: { lookup: fn },
+      };
+      const hostPromise: Promise<HostModule> = hostModule(hostOptions);
+      void hostPromise.then(host => { const module: Module = host; return host.dispose(); });
       const options: ExecutorOptions = { resolutionRoot: "." };
       const executor = new TSFuncExecutor(options);
       const proc = new ProcExecutor(options);

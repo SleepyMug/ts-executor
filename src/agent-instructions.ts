@@ -10,7 +10,7 @@ const DISCOVERY_WORKFLOW = `## Recommended workflow
 2. Inspect files at \`packageRoot\`: start with \`package.json\` and follow its \`types\` and \`exports\` entries to the declaration files defining the interfaces, including exported subpaths. Read the relevant declarations and referenced files before writing imports and calls. Descriptions are summaries, not complete API contracts.
 3. Write strict ES2022 TypeScript using ESM imports. Import registered packages by package specifier and Node built-ins with \`node:\` specifiers.
 4. Call \`execute\` with the source and an absolute existing \`cwd\` directory. It type-checks the source before running by default; repair reported errors and retry. The working directory controls relative filesystem and process behavior; import packages by specifier regardless of \`cwd\`.
-5. Each execution starts a fresh Node subprocess with fresh module state. Await asynchronous work and ensure \`main\` settles.`;
+5. Each execution starts a fresh Node subprocess with fresh module state. Await asynchronous work and ensure \`main\` settles. Some packages expose host-owned functions: these calls are asynchronous, accept and return JSON data, and may access state that persists between executions. Await them before returning from \`main\`; do not assume failed executions roll back their effects.`;
 
 const TS_FUNC_EXECUTION = `## JSON function execution
 

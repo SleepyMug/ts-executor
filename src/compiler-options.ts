@@ -15,7 +15,7 @@ export const runtimeCompilerOptions = Object.freeze({
   types: ["node"],
 });
 
-export function compilerOptions(workspaceRoot: string): ts.CompilerOptions {
+export function compilerOptions(workspaceRoot: string, resolutionRoot: string): ts.CompilerOptions {
   return {
     target: ts.ScriptTarget.ES2022,
     lib: ["lib.es2022.d.ts"],
@@ -31,7 +31,7 @@ export function compilerOptions(workspaceRoot: string): ts.CompilerOptions {
     types: ["node"],
     typeRoots: [
       resolve(workspaceRoot, "node_modules", "@types"),
-      resolve(dirname(workspaceRoot), "node_modules", "@types"),
+      resolve(resolutionRoot, "node_modules", "@types"),
       bundledTypeRoot,
     ],
   };

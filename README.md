@@ -49,6 +49,61 @@ process.stdout.write(stdout);
 
 The subprocess's stderr is captured for failure reporting. **On successful `ProcExecutor` execution, stderr is intentionally not returned, discarded, and never merged into stdout.** Runtime failures throw exported `ProcExecutionError`, which carries `stdout`, `stderr`, `exitCode`, and `signal`; reported guest errors retain useful name, message, and stack information.
 
+## Host-owned functions with reusable types
+
+Expose existing host closures and sessions as a typed package—no server or connection setup:
+
+```ts
+import { Type, hostFunction, hostModule, TSFuncExecutor } from "ts-executor";
+
+const resolutionRoot = process.cwd();
+let total = 0; // lives in the host, not the fresh subprocess
+const counter = await hostModule({
+  resolutionRoot,
+  specifier: "@host/counter",
+  description: "Update the current session's counter.",
+  functions: {
+    increment: hostFunction({
+      description: "Add an amount and return the new total.",
+      input: Type.Object({ amount: Type.Number() }, { additionalProperties: false }),
+      output: Type.Number(),
+      handler: ({ amount }) => (total += amount),
+    }),
+  },
+});
+
+const executor = new TSFuncExecutor({ resolutionRoot });
+executor.modules.register(counter);
+try {
+  const source = `
+    import { increment } from "@host/counter";
+    export async function main() {
+      return await increment({ amount: 2 });
+    }
+  `;
+  console.log((await executor.execute({ source, cwd: resolutionRoot })).value); // 2
+  console.log((await executor.execute({ source, cwd: resolutionRoot })).value); // 4
+} finally {
+  await counter.dispose();
+}
+```
+
+`Type` is the TypeBox schema builder. Schemas infer host handler types, validate JSON arguments/results without coercion, and generate agent-readable declarations and JSDoc. Guest functions always return promises, including when their host handler is synchronous. They work with both executors; host-call validation still runs with `check: false`.
+
+The package's `index.d.ts`, `index.js`, and manifest are generated **once per `hostModule` handle**. Reuse that handle across checks, executions, or multiple executors; its `packageRoot` remains available for `listModules` inspection. A new factory call creates a new package, not a persistent cross-restart cache entry.
+
+```text
+<resolutionRoot>/.ts-executor/
+  modules/module-<id>/      # reusable generated package
+  runs/run-<id>/            # main.ts, config, per-run node_modules links and I/O
+```
+
+Runs are removed after completion or failure; shared scaffolding remains. `dispose()` stops new operations using the module, waits already-started operations, and deletes only its generated package. Do not edit generated artifacts or dispose the handle while you still intend to use its registered executors. Existing `packageModule` files remain caller-owned, and custom materializers still run separately per operation.
+
+Calls may run concurrently against shared host state. Await all desired calls before `main` returns. The optional second handler argument provides `{ signal }`, aborted on execution-channel closure; already-started host work may continue if it ignores the signal. Failures do not roll back effects, and calls are never automatically retried. No host closures or live objects are copied into the child.
+
+Use `Type.Null()` and explicit `null` for no-data arguments/results. The initial schema subset supports ordinary JSON objects, arrays, fixed tuples, unions/intersections, records, literals, and primitives. Refs/recursion, transforms, formats, non-JSON kinds, `uniqueItems: true`, and some generator-specific edge cases are rejected; see the [schema contract](docs/components/host-functions/index.md#supported-schema-subset). See [the runnable host-module example](examples/06-host-module.mjs).
+
 ## Agent instructions
 
 Expose only `listModules` and `execute` as model tools. The harness uses the synchronous `getInstructions(): string` API to obtain deterministic Markdown for the agent prompt. It describes how to discover package interfaces and execute TypeScript with the selected executor's input/output contract.
@@ -76,7 +131,7 @@ Run [the harness example](examples/05-agent-harness.mjs) to see discovery, files
 
 Both executors expose `listModules` and `execute` for the model, plus `getInstructions`, `modules`, and `check` for harness code. `execute` checks by default; harness code can pass `check: false` to skip it. Each execution gets a newly spawned Node process, heap, module cache, and package state.
 
-`resolutionRoot` is the package-resolution base and parent of temporary operation workspaces. Required `execute.cwd` is an absolute path string or a query- and fragment-free local `file:` URL naming an existing directory. It controls `process.cwd()` and relative filesystem access, but package resolution remains anchored to the generated entrypoint below `resolutionRoot`.
+`resolutionRoot` is the package-resolution base; temporary operation workspaces live below its `.ts-executor/runs/` directory. Required `execute.cwd` is an absolute path string or a query- and fragment-free local `file:` URL naming an existing directory. It controls `process.cwd()` and relative filesystem access, but package resolution remains anchored to the generated entrypoint below `resolutionRoot`.
 
 General network clients—including generated Connect/Protobuf clients—are ordinary packages. Register built JavaScript and declarations with `packageModule`, then construct the connection inside submitted code.
 

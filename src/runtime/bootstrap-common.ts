@@ -1,5 +1,8 @@
 import { chmod, rename, writeFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { closeHostClient, initializeHostClient } from "./host-client.js";
+
+initializeHostClient();
 
 const RESTORE_ENVIRONMENT = "__TS_EXECUTOR_RESTORE_ENVIRONMENT";
 const SafePromise = Promise;
@@ -67,6 +70,7 @@ export async function complete(
   text: string,
   status: 0 | 1,
 ): Promise<void> {
+  closeHostClient();
   try {
     let flushError: unknown;
     try {

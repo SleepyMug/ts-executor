@@ -10,7 +10,12 @@ export async function project(t) {
 }
 
 export async function workspaceNames(root) {
-  return (await readdir(root)).filter((name) => name.startsWith(".ts-executor-run-"));
+  try {
+    return await readdir(join(root, ".ts-executor", "runs"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 export async function writePackage(root, name, files, packageJson) {

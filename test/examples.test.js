@@ -27,4 +27,7 @@ test("the TS function and stdout process examples run end to end", async () => {
   assert.match(stdout, /5\) Agent harness adapter/u);
   assert.match(stdout, /Model tools: listModules, execute/u);
   assert.match(stdout, /Corrected tool result: 5/u);
+  assert.match(stdout, /6\) Reusable host module/u);
+  assert.match(stdout, /Persistent host counter: 4/u);
+  assert.match(stdout, /Declarations reused across checks and both executor flavors/u);
 });
