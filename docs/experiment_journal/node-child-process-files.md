@@ -84,3 +84,26 @@ Do not strip colors in the executor or override the inherited environment to mak
 
 - [Node.js FORCE_COLOR environment variable](https://nodejs.org/api/cli.html#force_color1-2-3)
 - [Node.js console](https://nodejs.org/api/console.html)
+
+## 2026-09-16: Pipe capture drains completely after direct-child exit, and group kill reaches descendants
+
+### Context
+
+Decision 0006 replaces regular-file capture with host-owned pipes so retained output can be bounded, while keeping direct-child `exit` as the only lifecycle wait. Two behaviours needed verification on Node v24.15.0, Linux x64: that every byte the direct child wrote before exiting is readable by the host after `exit` even when the host event loop was blocked, and that `process.kill(-pid, signal)` on a `detached` child reaches guest-created descendants.
+
+### Finding
+
+A child wrote 300 KiB to a pipe-backed `process.stdout`, spawned a detached descendant that inherited the pipe and would write 300 ms later, then ended stdout and exited. The parent drained `data` events into a 100 KiB cap and, in its `exit` handler, blocked the event loop synchronously for 200 ms before scheduling two `setImmediate` turns and destroying the pipes. All 307 200 bytes were received (102 400 retained, `truncated` true) about 220 ms after exit, and the descendant's later bytes never arrived. A separate probe with a SIGTERM-ignoring child that spawned `sleep 300`: `process.kill(-pid, "SIGTERM")` killed the sleeper but not the child; `process.kill(-pid, "SIGKILL")` killed the child, which the parent reaped with `signal: "SIGKILL"`.
+
+Also observed while testing: a guest whose only pending work is an unresolved promise exits with code 0 immediately (Node's loop has nothing to wait on), so a hung-program fixture must hold a handle such as an interval or a child process. The `tsx` entry resolved by `require.resolve("tsx")` is `dist/loader.mjs`, loaded in-process by `--import`; no wrapper process exists, so the direct child is the guest.
+
+### Implications
+
+- Waiting for `exit` plus one further poll phase (two `setImmediate` turns) recovers every direct-child byte without waiting for pipe EOF, so descendants cannot delay completion.
+- SIGTERM followed by SIGKILL to the group is sufficient to terminate a guest that ignores SIGTERM together with its ordinary descendants.
+- Tests of cancellation must keep the guest alive with a real handle.
+
+### References
+
+- Probe scripts: `/tmp/tsx-probe/parent.mjs`, `/tmp/tsx-probe/child.mjs`, `/tmp/tsx-probe/kill.mjs` (not retained).
+- Implementation: `src/runtime/run-subprocess.ts`; tests: `test/cancellation.test.js`, `test/output-limits.test.js`.

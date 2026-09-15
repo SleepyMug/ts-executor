@@ -1,12 +1,14 @@
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ExecutionAbortedError } from "../errors.js";
 import {
   deserializeError,
   parseResultEnvelope,
   type ResultEnvelope,
 } from "../json-value.js";
-import type { JsonValue } from "../types.js";
+import type { ResolvedControl } from "../limits.js";
+import type { JsonValue, OutputTruncation } from "../types.js";
 import type { PreparedWorkspace } from "../workspace.js";
 import { runSubprocess, type SubprocessResult } from "./run-subprocess.js";
 
@@ -14,6 +16,7 @@ export interface TSFuncProcessResult {
   readonly value: JsonValue;
   readonly stdout: string;
   readonly stderr: string;
+  readonly truncated: OutputTruncation;
 }
 
 interface TSFuncFiles {
@@ -36,24 +39,13 @@ type Termination = SuccessfulTermination | FailedTermination;
 
 const bootstrap = fileURLToPath(new URL("./ts-func-subprocess.js", import.meta.url));
 
-function outputError(error: Error, stdout: string, stderr: string): Error {
+function outputError(error: Error, outcome: SubprocessResult): Error {
   Object.defineProperties(error, {
-    stdout: { value: stdout, enumerable: true },
-    stderr: { value: stderr, enumerable: true },
+    stdout: { value: outcome.stdout, enumerable: true },
+    stderr: { value: outcome.stderr, enumerable: true },
+    truncated: { value: outcome.truncated, enumerable: true },
   });
   return error;
-}
-
-function attachCleanupError(primary: Error, cleanup: Error): void {
-  try {
-    Object.defineProperty(primary, "cleanupError", {
-      value: cleanup,
-      enumerable: true,
-      configurable: true,
-    });
-  } catch {
-    // Preserve the primary runtime failure even when it cannot accept metadata.
-  }
 }
 
 async function prepareFiles(workspace: PreparedWorkspace, inputEnvelope: string): Promise<TSFuncFiles> {
@@ -123,6 +115,7 @@ export async function runTSFuncProcess(
   workspace: PreparedWorkspace,
   cwd: string,
   inputEnvelope: string,
+  control: ResolvedControl,
 ): Promise<TSFuncProcessResult> {
   const files = await prepareFiles(workspace, inputEnvelope);
   const outcome = await runSubprocess(
@@ -130,19 +123,20 @@ export async function runTSFuncProcess(
     cwd,
     bootstrap,
     [workspace.entrypoint, files.input, files.result, files.resultTemporary],
+    control,
   );
+  if (outcome.aborted !== undefined) {
+    throw new ExecutionAbortedError(outcome.aborted, {
+      ...outcome,
+      durationMs: performance.now() - control.startedAt,
+    });
+  }
   const termination = await classifyTermination(files, outcome);
-  if (!termination.ok) {
-    const primary = outputError(termination.error, outcome.stdout, outcome.stderr);
-    if (outcome.cleanupError !== undefined) attachCleanupError(primary, outcome.cleanupError);
-    throw primary;
-  }
-  if (outcome.cleanupError !== undefined) {
-    throw outputError(outcome.cleanupError, outcome.stdout, outcome.stderr);
-  }
+  if (!termination.ok) throw outputError(termination.error, outcome);
   return Object.freeze({
     value: termination.value,
     stdout: outcome.stdout,
     stderr: outcome.stderr,
+    truncated: outcome.truncated,
   });
 }

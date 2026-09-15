@@ -61,7 +61,37 @@ export interface ExecutorOptions {
   readonly resolutionRoot: string | URL;
 }
 
-export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> {
+/** Per-stream flags: true when captured bytes beyond `maxOutputBytes` were discarded. */
+export interface OutputTruncation {
+  readonly stdout: boolean;
+  readonly stderr: boolean;
+}
+
+/** Why an execution was terminated by the host rather than by the guest settling. */
+export type AbortReason = "signal" | "timeout";
+
+/**
+ * Cancellation and capture limits shared by both execution flavors.
+ * Cancellation kills the guest's whole process group; see the executor docs.
+ */
+export interface ExecutionControl {
+  /** Aborting terminates the guest process group and rejects with `ExecutionAbortedError`. */
+  readonly signal?: AbortSignal;
+  /**
+   * Wall-clock deadline in milliseconds measured from the `execute` call, covering
+   * checking and execution. Positive integer; omitted means no deadline.
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Bytes retained per stream (stdout and stderr separately). Positive integer;
+   * defaults to `DEFAULT_MAX_OUTPUT_BYTES`. Further bytes are read and discarded.
+   */
+  readonly maxOutputBytes?: number;
+  /** Milliseconds between SIGTERM and SIGKILL on abort/timeout. Defaults to `DEFAULT_KILL_GRACE_MS`. */
+  readonly killGraceMs?: number;
+}
+
+export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> extends ExecutionControl {
   readonly source: string;
   /** Absolute directory path or file URL used only as the subprocess working directory. */
   readonly cwd: string | URL;
@@ -74,15 +104,31 @@ export interface TSFuncExecuteResult<Output extends JsonValue = JsonValue> {
   readonly value: Output;
   readonly stdout: string;
   readonly stderr: string;
+  readonly truncated: OutputTruncation;
   readonly durationMs: number;
 }
 
-export interface ProcExecuteRequest {
+export interface ProcExecuteRequest extends ExecutionControl {
   readonly source: string;
   /** Absolute directory path or file URL used only as the subprocess working directory. */
   readonly cwd: string | URL;
   /** Typecheck before execution. Defaults to true. */
   readonly check?: boolean;
+}
+
+/** Result of `ProcExecutor.executeDetailed`: stdout plus what `execute` cannot express. */
+export interface ProcExecuteResult {
+  readonly stdout: string;
+  readonly truncated: OutputTruncation;
+  readonly durationMs: number;
+}
+
+/** Effective limits the harness enforces, so `getInstructions` can state them to the model. */
+export interface InstructionsOptions {
+  /** The deadline the harness passes to every `execute`, if any. */
+  readonly timeoutMs?: number;
+  /** The per-stream retention cap the harness passes; defaults to `DEFAULT_MAX_OUTPUT_BYTES`. */
+  readonly maxOutputBytes?: number;
 }
 
 export interface PackageModuleOptions {

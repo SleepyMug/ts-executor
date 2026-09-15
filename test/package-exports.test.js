@@ -9,13 +9,23 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+const require = createRequire(import.meta.url);
+
+// Resolve the physical package roots rather than assuming a hoisted layout:
+// pnpm keeps transitive dependencies such as undici-types beside @types/node
+// under node_modules/.pnpm instead of at the repository's top level.
+const nodeTypesRoot = dirname(require.resolve("@types/node/package.json"));
+const undiciTypesRoot = dirname(
+  createRequire(join(nodeTypesRoot, "package.json")).resolve("undici-types/package.json"),
+);
 
 async function filesUnder(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -44,22 +54,19 @@ test("the packed public package has the intended files, declarations, and consum
     ...await filesUnder(join(repositoryRoot, "docs"), "docs"),
     ...await filesUnder(join(repositoryRoot, "examples"), "examples"),
   ].sort();
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const { stdout } = await execFileAsync(
-    npm,
+    pnpm,
     [
+      "--config.ignore-scripts=true",
       "pack",
-      "--ignore-scripts",
       "--json",
       "--pack-destination",
       root,
-      repositoryRoot,
     ],
-    { cwd: root },
+    { cwd: repositoryRoot },
   );
-  const packResults = JSON.parse(stdout);
-  assert.equal(packResults.length, 1);
-  const packResult = packResults[0];
+  const packResult = JSON.parse(stdout);
   assert.deepEqual(packResult.files.map((file) => file.path).sort(), expectedFiles);
 
   const packageRoot = join(root, "node_modules", "ts-executor");
@@ -68,7 +75,7 @@ test("the packed public package has the intended files, declarations, and consum
     "tar",
     [
       "-xzf",
-      join(root, packResult.filename),
+      resolve(root, packResult.filename),
       "--strip-components=1",
       "-C",
       packageRoot,
@@ -80,12 +87,12 @@ test("the packed public package has the intended files, declarations, and consum
   await mkdir(join(root, "node_modules", "@types"), { recursive: true });
   await Promise.all([
     symlink(
-      join(repositoryRoot, "node_modules", "@types", "node"),
+      nodeTypesRoot,
       join(root, "node_modules", "@types", "node"),
       process.platform === "win32" ? "junction" : "dir",
     ),
     symlink(
-      join(repositoryRoot, "node_modules", "undici-types"),
+      undiciTypesRoot,
       join(root, "node_modules", "undici-types"),
       process.platform === "win32" ? "junction" : "dir",
     ),
@@ -108,6 +115,9 @@ test("the packed public package has the intended files, declarations, and consum
       import assert from "node:assert/strict";
       import * as api from "ts-executor";
       assert.deepEqual(Object.keys(api).sort(), [
+        "DEFAULT_KILL_GRACE_MS",
+        "DEFAULT_MAX_OUTPUT_BYTES",
+        "ExecutionAbortedError",
         "ProcExecutionError",
         "ProcExecutor",
         "TSFuncExecutor",
@@ -155,6 +165,7 @@ test("the packed public package has the intended files, declarations, and consum
     join(root, "smoke.ts"),
     `
       import {
+        ExecutionAbortedError,
         ProcExecutionError,
         ProcExecutor,
         TSFuncExecutor,
@@ -173,6 +184,9 @@ test("the packed public package has the intended files, declarations, and consum
         type Module,
         type ModuleSummary,
         type ProcExecuteRequest,
+        type ProcExecuteResult,
+        type ExecutionControl,
+        type OutputTruncation,
         type TSFuncExecuteRequest,
         type TSFuncExecuteResult,
       } from "ts-executor";
@@ -228,6 +242,17 @@ test("the packed public package has the intended files, declarations, and consum
         cwd: ".",
       };
       const stdout: Promise<string> = proc.execute(procRequest);
+      const detailed: Promise<ProcExecuteResult> = proc.executeDetailed(procRequest);
+      const control: ExecutionControl = { timeoutMs: 1000, maxOutputBytes: 1024, signal: new AbortController().signal };
+      void executor.execute({ ...tsFuncRequest, ...control });
+      // @ts-expect-error timeoutMs is a number.
+      void proc.execute({ ...procRequest, timeoutMs: "1s" });
+      declare const abortedError: ExecutionAbortedError;
+      const reason: "signal" | "timeout" = abortedError.reason;
+      const abortedOutput: OutputTruncation = abortedError.truncated;
+      void reason;
+      void abortedOutput;
+      void detailed;
       // @ts-expect-error ProcExecutor has no input contract.
       void proc.execute({ ...procRequest, input: null });
       // @ts-expect-error ProcExecutor requires cwd.
@@ -239,6 +264,8 @@ test("the packed public package has the intended files, declarations, and consum
       const errorDetail: string = procError.stderr;
       const errorCode: number | null = procError.exitCode;
       const errorSignal: NodeJS.Signals | null = procError.signal;
+      const errorTruncated: OutputTruncation = procError.truncated;
+      void errorTruncated;
       void errorOutput;
       void errorDetail;
       void errorCode;

@@ -1,11 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProcExecutionError } from "../errors.js";
+import { ExecutionAbortedError, ProcExecutionError } from "../errors.js";
 import { parseProcStatusEnvelope, type ProcStatusEnvelope } from "../proc-status.js";
 import type { SerializedError } from "../json-value.js";
+import type { ResolvedControl } from "../limits.js";
+import type { OutputTruncation } from "../types.js";
 import type { PreparedWorkspace } from "../workspace.js";
 import { runSubprocess, type SubprocessResult } from "./run-subprocess.js";
+
+export interface ProcProcessResult {
+  readonly stdout: string;
+  readonly truncated: OutputTruncation;
+}
 
 interface ProcFiles {
   readonly status: string;
@@ -84,53 +91,42 @@ async function classifyTermination(
   };
 }
 
-function attachCleanupError(primary: Error, cleanup: Error): void {
-  try {
-    Object.defineProperty(primary, "cleanupError", {
-      value: cleanup,
-      enumerable: true,
-      configurable: true,
-    });
-  } catch {
-    // Preserve the primary execution failure even when it cannot accept metadata.
-  }
-}
-
 function procError(
   termination: FailedTermination,
   outcome: SubprocessResult,
 ): ProcExecutionError {
   const error = new ProcExecutionError(
     termination.message,
-    outcome.stdout,
-    outcome.stderr,
-    outcome.exitCode,
-    outcome.signal,
+    outcome,
     termination.cause === undefined ? undefined : { cause: termination.cause },
   );
   if (termination.guestError !== undefined) {
     error.name = termination.guestError.name;
     if (termination.guestError.stack !== undefined) error.stack = termination.guestError.stack;
   }
-  if (outcome.cleanupError !== undefined) attachCleanupError(error, outcome.cleanupError);
   return error;
 }
 
-export async function runProcProcess(workspace: PreparedWorkspace, cwd: string): Promise<string> {
+export async function runProcProcess(
+  workspace: PreparedWorkspace,
+  cwd: string,
+  control: ResolvedControl,
+): Promise<ProcProcessResult> {
   const paths = files(workspace);
   const outcome = await runSubprocess(
     workspace,
     cwd,
     bootstrap,
     [workspace.entrypoint, paths.status, paths.statusTemporary],
+    control,
   );
+  if (outcome.aborted !== undefined) {
+    throw new ExecutionAbortedError(outcome.aborted, {
+      ...outcome,
+      durationMs: performance.now() - control.startedAt,
+    });
+  }
   const termination = await classifyTermination(paths, outcome);
   if (!termination.ok) throw procError(termination, outcome);
-  if (outcome.cleanupError !== undefined) {
-    throw procError(
-      { ok: false, message: outcome.cleanupError.message, cause: outcome.cleanupError },
-      outcome,
-    );
-  }
-  return outcome.stdout;
+  return Object.freeze({ stdout: outcome.stdout, truncated: outcome.truncated });
 }

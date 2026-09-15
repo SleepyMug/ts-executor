@@ -606,11 +606,9 @@ for (const Flavor of flavors) {
       { name: "invalid source", options: { source: null }, error: /source must be a string/u },
       { name: "typecheck", options: { check: true, source: 'export function main() { const wrong: number = "text"; return null; }' }, error: error => error instanceof TypeCheckError },
       { name: "materialize", materialize() { throw new Error("injected materialize failure"); }, error: /injected materialize failure/u },
-      { name: "stdout creation", async materialize(context) { await mkdir(join(context.workspaceRoot, "stdout.log")); }, error: /EISDIR|illegal operation on a directory/u },
       { name: "spawn after cwd disappears", removeCwd: true, error: /ENOENT|spawn/u },
       { name: "early exit", options: { source: "export function main() { process.exit(7); }" }, error: /code 7 without a valid error/u },
       { name: "guest throw", options: { source: 'export function main() { throw new Error("guest failed"); }' }, error: /guest failed/u },
-      { name: "output read", options: { source: 'import { unlinkSync } from "node:fs"; export function main() { unlinkSync(new URL("./stdout.log", import.meta.url)); return null; }' }, error: /ENOENT/u },
     ];
     if (Flavor === TSFuncExecutor) {
       cases.unshift({ name: "invalid input", options: { input: { bad: undefined } }, error: /Execution input.*undefined/u });

@@ -12,7 +12,7 @@ for (const Executor of [TSFuncExecutor, ProcExecutor]) {
     const root = await project(t);
     const executor = new Executor({ resolutionRoot: root });
     const adapter = createHarnessAdapter(executor);
-    assert.equal(adapter.instructions, executor.getInstructions());
+    assert.equal(adapter.instructions, executor.getInstructions({ maxOutputBytes: 4 * 1024 * 1024 }));
     assert.deepEqual(adapter.tools.map(({ name }) => name), ["listModules", "execute"]);
     const schema = adapter.tools[1].inputSchema;
     assert.equal(schema.properties.cwd.type, "string");
@@ -117,6 +117,49 @@ for (const Executor of [TSFuncExecutor, ProcExecutor]) {
     assert.deepEqual(await workspaceNames(root), []);
   });
 }
+
+test("adapter applies harness limits, forwards the call signal, and reports abort and truncation", async (t) => {
+  const root = await project(t);
+  const adapter = createHarnessAdapter(new TSFuncExecutor({ resolutionRoot: root }), {
+    timeoutMs: 20_000,
+    maxOutputBytes: 512,
+  });
+  assert.match(adapter.instructions, /must finish within 20 seconds/u);
+  assert.match(adapter.instructions, /retained up to 512 bytes/u);
+
+  const truncated = await adapter.callTool("execute", JSON.stringify({
+    cwd: root,
+    source: 'export function main() { process.stdout.write("y".repeat(2048)); return 1; }',
+  }));
+  assert.equal(truncated.isError, false);
+  const result = JSON.parse(truncated.content);
+  assert.equal(result.value, 1);
+  assert.equal(result.stdout.length, 512);
+  assert.deepEqual(result.truncated, { stdout: true, stderr: false });
+
+  const controller = new AbortController();
+  const aborted = adapter.callTool("execute", JSON.stringify({
+    cwd: root,
+    source: 'export async function main() { process.stdout.write("started"); setInterval(() => {}, 1000); await new Promise(() => {}); }',
+  }), { signal: controller.signal });
+  setTimeout(() => controller.abort(), 700);
+  const failure = await aborted;
+  assert.equal(failure.isError, true);
+  const details = JSON.parse(failure.content);
+  assert.equal(details.name, "ExecutionAbortedError");
+  assert.equal(details.reason, "signal");
+  assert.equal(typeof details.durationMs, "number");
+  assert.deepEqual(details.truncated, { stdout: false, stderr: false });
+
+  const procAdapter = createHarnessAdapter(new ProcExecutor({ resolutionRoot: root }), { maxOutputBytes: 4 });
+  const capped = await procAdapter.callTool("execute", JSON.stringify({
+    cwd: root,
+    source: 'export function main(): void { process.stdout.write("123456"); }',
+  }));
+  assert.equal(capped.isError, false);
+  assert.equal(capped.content, "1234\n[stdout truncated at 4 bytes]");
+  assert.deepEqual(await workspaceNames(root), []);
+});
 
 test("TSFunc adapter preserves omitted input, explicit null, and JSON input values", async (t) => {
   const root = await project(t);

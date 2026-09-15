@@ -5,6 +5,7 @@ import type {
   CheckRequest,
   CheckResult,
   ExecutorOptions,
+  InstructionsOptions,
   JsonValue,
   ListModulesRequest,
   ModuleSummary,
@@ -23,8 +24,8 @@ export class TSFuncExecutor {
     this.modules = this.#core.modules;
   }
 
-  getInstructions(): string {
-    return this.#core.getInstructions();
+  getInstructions(options?: InstructionsOptions): string {
+    return this.#core.getInstructions(options);
   }
 
   async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
@@ -41,17 +42,20 @@ export class TSFuncExecutor {
   >(
     request: TSFuncExecuteRequest<Input>,
   ): Promise<TSFuncExecuteResult<Output>> {
-    const started = performance.now();
     const result = await this.#core.execute(
       request,
       () => inputEnvelopeJson(objectHasOwn(request, "input"), request.input),
-      async (workspace, cwd, inputEnvelope) => runTSFuncProcess(workspace, cwd, inputEnvelope),
+      async (workspace, cwd, inputEnvelope, control) => {
+        const process = await runTSFuncProcess(workspace, cwd, inputEnvelope, control);
+        return { ...process, durationMs: performance.now() - control.startedAt };
+      },
     );
     return Object.freeze({
       value: result.value as Output,
       stdout: result.stdout,
       stderr: result.stderr,
-      durationMs: performance.now() - started,
+      truncated: result.truncated,
+      durationMs: result.durationMs,
     });
   }
 }

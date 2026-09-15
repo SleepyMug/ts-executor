@@ -284,32 +284,6 @@ test("user errors retain name, message, stack, and captured output", async (t) =
   assert.deepEqual(await workspaceNames(root), []);
 });
 
-test("an output-file read failure preserves the peer stream", async (t) => {
-  const root = await project(t);
-  const executor = new TSFuncExecutor({ resolutionRoot: root });
-  await assert.rejects(
-    executor.execute({
-      cwd: root,
-      source: `
-        import { unlinkSync, writeSync } from "node:fs";
-        import { fileURLToPath } from "node:url";
-        export function main(): string {
-          writeSync(2, "preserved stderr\\n");
-          unlinkSync(fileURLToPath(new URL("./stdout.log", import.meta.url)));
-          return "done";
-        }
-      `,
-    }),
-    (error) => {
-      assert.equal(error?.code, "ENOENT");
-      assert.equal(error?.stdout, "");
-      assert.equal(error?.stderr, "preserved stderr\n");
-      return true;
-    },
-  );
-  assert.deepEqual(await workspaceNames(root), []);
-});
-
 test("arbitrary thrown values are reduced to safe errors", async (t) => {
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });

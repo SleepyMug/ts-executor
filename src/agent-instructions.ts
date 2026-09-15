@@ -1,3 +1,6 @@
+import { DEFAULT_MAX_OUTPUT_BYTES } from "./limits.js";
+import type { InstructionsOptions } from "./types.js";
+
 type ExecutorName = "TSFuncExecutor" | "ProcExecutor";
 
 const INTRODUCTION = `# TypeScript executor
@@ -34,6 +37,44 @@ const FLAVOR_SEGMENTS: Readonly<Record<ExecutorName, string>> = Object.freeze({
   ProcExecutor: PROC_EXECUTION,
 });
 
-export function instructionsFor(executorName: ExecutorName): string {
-  return [...SHARED_SEGMENTS, FLAVOR_SEGMENTS[executorName]].join("\n\n");
+function plural(count: number, unit: string): string {
+  return `${count} ${unit}${count === 1 ? "" : "s"}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return plural(bytes, "byte");
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds % 60_000 === 0) return plural(milliseconds / 60_000, "minute");
+  if (milliseconds % 1000 === 0) return plural(milliseconds / 1000, "second");
+  return `${milliseconds} ms`;
+}
+
+/** Deterministic statement of the limits the harness enforces on every execution. */
+function limitsSegment(executorName: ExecutorName, options: InstructionsOptions | undefined): string {
+  const maxOutputBytes = options?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  const consequence = executorName === "TSFuncExecutor"
+    ? "further output is discarded and the result marks that stream as truncated"
+    : "further stderr is discarded, and stdout beyond the cap makes the call fail";
+  const lines = [
+    "## Limits",
+    "",
+    `- stdout and stderr are each retained up to ${formatBytes(maxOutputBytes)}; ${consequence}. Write large data to a file under \`cwd\` and return or print its path instead of the data.`,
+  ];
+  if (options?.timeoutMs !== undefined) {
+    lines.push(
+      `- Each execution must finish within ${formatDuration(options.timeoutMs)} of wall-clock time including type-checking; afterwards the program and every process it started are killed and the call fails with the output captured so far. Give your own child processes shorter deadlines.`,
+    );
+  }
+  lines.push(
+    "- If the call is cancelled or times out, effects the program already had are not rolled back.",
+  );
+  return lines.join("\n");
+}
+
+export function instructionsFor(executorName: ExecutorName, options?: InstructionsOptions): string {
+  return [...SHARED_SEGMENTS, FLAVOR_SEGMENTS[executorName], limitsSegment(executorName, options)].join("\n\n");
 }

@@ -1,6 +1,6 @@
 {
   "name": "@sleepymug/ts-executor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Execute checked TypeScript as JSON functions or stdout processes in fresh Node subprocesses.",
   "type": "module",
   "exports": {
@@ -11,19 +11,21 @@
   },
   "files": [
     "dist",
+    "docs",
     "examples"
   ],
   "engines": {
     "node": ">=18.19.0"
   },
+  "packageManager": "pnpm@10.33.2",
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js",
-    "check": "npm run typecheck && npm test",
-    "examples": "npm run build && node examples/run-all.mjs",
-    "prepack": "npm run build"
+    "test": "pnpm run build && node --test test/*.test.js",
+    "check": "pnpm run typecheck && pnpm test",
+    "examples": "pnpm run build && node examples/run-all.mjs",
+    "prepack": "pnpm run build"
   },
   "keywords": [
     "typescript",
@@ -39,5 +41,10 @@
     "json-schema-to-typescript": "^15.0.4",
     "tsx": "^4.23.1",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

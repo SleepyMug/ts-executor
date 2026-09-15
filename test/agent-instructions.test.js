@@ -38,6 +38,28 @@ test("executors return deterministic shared and flavor-specific agent instructio
   assert.doesNotMatch(procInstructions, /^## JSON function execution$/mu);
 });
 
+test("instructions state the effective limits deterministically", () => {
+  const tsFunc = new TSFuncExecutor({ resolutionRoot: process.cwd() });
+  const proc = new ProcExecutor({ resolutionRoot: process.cwd() });
+
+  const defaults = tsFunc.getInstructions();
+  assert.match(defaults, /^## Limits$/mu);
+  assert.match(defaults, /retained up to 4 MiB/u);
+  assert.match(defaults, /marks that stream as truncated/u);
+  assert.doesNotMatch(defaults, /must finish within/u);
+  assert.match(proc.getInstructions(), /stdout beyond the cap makes the call fail/u);
+
+  const limited = tsFunc.getInstructions({ timeoutMs: 90_000, maxOutputBytes: 64 * 1024 });
+  assert.equal(tsFunc.getInstructions({ timeoutMs: 90_000, maxOutputBytes: 64 * 1024 }), limited);
+  assert.match(limited, /retained up to 64 KiB/u);
+  assert.match(limited, /must finish within 90 seconds of wall-clock time including type-checking/u);
+  assert.match(limited, /every process it started are killed/u);
+  assert.match(tsFunc.getInstructions({ timeoutMs: 60_000 }), /within 1 minute of/u);
+  assert.match(tsFunc.getInstructions({ timeoutMs: 1500 }), /within 1500 ms of/u);
+  assert.match(tsFunc.getInstructions({ maxOutputBytes: 1000 }), /up to 1000 bytes/u);
+  assert.notEqual(limited, defaults);
+});
+
 test("instructions stay independent of module registration and filesystem operations", () => {
   for (const Executor of [TSFuncExecutor, ProcExecutor]) {
     const executor = new Executor({ resolutionRoot: process.cwd() });

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { open, readFile, type FileHandle } from "node:fs/promises";
 import { createRequire } from "node:module";
+import type { ResolvedControl } from "../limits.js";
+import type { AbortReason, OutputTruncation } from "../types.js";
 import type { PreparedWorkspace } from "../workspace.js";
 import { attachHostBridge } from "./host-bridge.js";
 
@@ -9,8 +10,10 @@ export interface SubprocessResult {
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
+  readonly truncated: OutputTruncation;
+  /** Set when the host terminated the process group on abort or deadline. */
+  readonly aborted?: AbortReason;
   readonly error?: Error;
-  readonly cleanupError?: Error;
 }
 
 interface ExitOutcome {
@@ -39,6 +42,45 @@ function environment(workspace: PreparedWorkspace): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * Retains at most `limit` bytes of a stream and discards the rest. Bytes beyond the
+ * limit are still consumed so the guest is never blocked on a full pipe.
+ */
+class BoundedCapture {
+  readonly #limit: number;
+  readonly #chunks: Buffer[] = [];
+  #retained = 0;
+  #truncated = false;
+
+  constructor(limit: number) {
+    this.#limit = limit;
+  }
+
+  push(chunk: Buffer): void {
+    const room = this.#limit - this.#retained;
+    if (room <= 0) {
+      if (chunk.length > 0) this.#truncated = true;
+      return;
+    }
+    if (chunk.length <= room) {
+      this.#chunks.push(chunk);
+      this.#retained += chunk.length;
+      return;
+    }
+    this.#chunks.push(chunk.subarray(0, room));
+    this.#retained = this.#limit;
+    this.#truncated = true;
+  }
+
+  get truncated(): boolean {
+    return this.#truncated;
+  }
+
+  text(): string {
+    return Buffer.concat(this.#chunks, this.#retained).toString("utf8");
+  }
+}
+
 function waitForExit(child: ChildProcess): Promise<ExitOutcome> {
   return new Promise((resolve) => {
     let settled = false;
@@ -47,7 +89,7 @@ function waitForExit(child: ChildProcess): Promise<ExitOutcome> {
       if (settled) return;
       processError ??= error;
       // A failed spawn has no process to reap. IPC errors after a successful
-      // spawn do NOT mean the child exited: retain files and leases until exit.
+      // spawn do NOT mean the child exited: retain leases until exit.
       if (child.pid !== undefined) return;
       settled = true;
       resolve({ exitCode: null, signal: null, error });
@@ -60,62 +102,116 @@ function waitForExit(child: ChildProcess): Promise<ExitOutcome> {
   });
 }
 
-async function closeHandles(handles: readonly FileHandle[]): Promise<Error | undefined> {
-  const results = await Promise.allSettled(handles.map(async (handle) => handle.close()));
-  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-  if (failed === undefined) return undefined;
-  return failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+/**
+ * Bytes the direct child wrote before exiting are already in the kernel pipe buffer
+ * when `exit` is observed; one further poll phase reads them. Two `setImmediate`
+ * turns guarantee that poll phase ran even if the event loop was blocked when the
+ * child exited. Descendants holding the pipe open are cut off afterwards (EPIPE).
+ */
+function drainAfterExit(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(() => setImmediate(resolve));
+  });
 }
 
-async function readOutputs(workspace: PreparedWorkspace): Promise<{
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly error?: Error;
-}> {
-  const [stdoutResult, stderrResult] = await Promise.allSettled([
-    readFile(workspace.stdout, "utf8"),
-    readFile(workspace.stderr, "utf8"),
-  ]);
-  const stdout = stdoutResult.status === "fulfilled" ? stdoutResult.value : "";
-  const stderr = stderrResult.status === "fulfilled" ? stderrResult.value : "";
-  const failure = stdoutResult.status === "rejected"
-    ? stdoutResult.reason
-    : stderrResult.status === "rejected"
-      ? stderrResult.reason
-      : undefined;
-  if (failure === undefined) return { stdout, stderr };
-  return {
-    stdout,
-    stderr,
-    error: failure instanceof Error ? failure : new Error(String(failure)),
-  };
+function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal);
+    } else {
+      process.kill(-pid, signal);
+    }
+  } catch {
+    // The group leader may already be gone; a direct kill is the best remaining effort.
+    try {
+      child.kill(signal);
+    } catch {
+      // Already exited.
+    }
+  }
 }
 
-/** Starts and reaps one child without interpreting any flavor-specific status file. */
+/**
+ * Terminates the guest process group on abort or deadline: SIGTERM first, SIGKILL
+ * after the grace period. Returns the abort reason once triggered.
+ */
+class Terminator {
+  readonly #child: ChildProcess;
+  readonly #control: ResolvedControl;
+  #reason: AbortReason | undefined;
+  #deadline: NodeJS.Timeout | undefined;
+  #escalation: NodeJS.Timeout | undefined;
+  readonly #onAbort = (): void => this.trigger("signal");
+
+  constructor(child: ChildProcess, control: ResolvedControl) {
+    this.#child = child;
+    this.#control = control;
+    control.signal?.addEventListener("abort", this.#onAbort, { once: true });
+    if (control.deadlineAt !== undefined) {
+      const remaining = Math.max(0, control.deadlineAt - performance.now());
+      this.#deadline = setTimeout(() => this.trigger("timeout"), remaining);
+    }
+    if (control.signal?.aborted === true) this.trigger("signal");
+  }
+
+  trigger(reason: AbortReason): void {
+    if (this.#reason !== undefined) return;
+    this.#reason = reason;
+    killGroup(this.#child, "SIGTERM");
+    this.#escalation = setTimeout(() => killGroup(this.#child, "SIGKILL"), this.#control.killGraceMs);
+  }
+
+  get reason(): AbortReason | undefined {
+    return this.#reason;
+  }
+
+  dispose(): void {
+    this.#control.signal?.removeEventListener("abort", this.#onAbort);
+    if (this.#deadline !== undefined) clearTimeout(this.#deadline);
+    if (this.#escalation !== undefined) clearTimeout(this.#escalation);
+  }
+}
+
+/**
+ * Starts and reaps one child without interpreting any flavor-specific status file.
+ * fd 1 and fd 2 are pipes drained into bounded buffers; the host waits only for the
+ * direct child's exit, never for pipe EOF.
+ */
 export async function runSubprocess(
   workspace: PreparedWorkspace,
   cwd: string,
   bootstrap: string,
   arguments_: readonly string[],
+  control: ResolvedControl,
 ): Promise<SubprocessResult> {
-  const handles: FileHandle[] = [];
+  const stdout = new BoundedCapture(control.maxOutputBytes);
+  const stderr = new BoundedCapture(control.maxOutputBytes);
   let outcome: ExitOutcome = { exitCode: null, signal: null };
   let closeBridge: (() => void) | undefined;
+  let terminator: Terminator | undefined;
+  let child: ChildProcess | undefined;
   try {
-    handles.push(await open(workspace.stdout, "w", 0o600));
-    handles.push(await open(workspace.stderr, "w", 0o600));
-    const child = spawn(
+    child = spawn(
       process.execPath,
       ["--import", tsxImport, bootstrap, ...arguments_],
       {
         cwd,
         env: environment(workspace),
+        // Own process group so abort/timeout can terminate guest descendants too.
+        detached: process.platform !== "win32",
         stdio: workspace.hostBindings.size === 0
-          ? ["ignore", handles[0]?.fd ?? "ignore", handles[1]?.fd ?? "ignore"]
-          : ["ignore", handles[0]?.fd ?? "ignore", handles[1]?.fd ?? "ignore", "ipc"],
+          ? ["ignore", "pipe", "pipe"]
+          : ["ignore", "pipe", "pipe", "ipc"],
         serialization: "json",
       },
     );
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
+    terminator = new Terminator(child, control);
     if (workspace.hostBindings.size > 0) {
       closeBridge = attachHostBridge(child, async (id, method, input, signal) => {
         const binding = workspace.hostBindings.get(id);
@@ -124,6 +220,7 @@ export async function runSubprocess(
       });
     }
     outcome = await waitForExit(child);
+    if (child.pid !== undefined) await drainAfterExit();
   } catch (error) {
     outcome = {
       exitCode: null,
@@ -132,18 +229,19 @@ export async function runSubprocess(
     };
   } finally {
     closeBridge?.();
+    terminator?.dispose();
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
   }
 
-  const cleanupError = await closeHandles(handles);
-  const output = await readOutputs(workspace);
+  const aborted = terminator?.reason;
   return Object.freeze({
     exitCode: outcome.exitCode,
     signal: outcome.signal,
-    stdout: output.stdout,
-    stderr: output.stderr,
-    ...(outcome.error === undefined && output.error === undefined
-      ? {}
-      : { error: outcome.error ?? output.error }),
-    ...(cleanupError === undefined ? {} : { cleanupError }),
+    stdout: stdout.text(),
+    stderr: stderr.text(),
+    truncated: Object.freeze({ stdout: stdout.truncated, stderr: stderr.truncated }),
+    ...(aborted === undefined ? {} : { aborted }),
+    ...(outcome.error === undefined ? {} : { error: outcome.error }),
   });
 }

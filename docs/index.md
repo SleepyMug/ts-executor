@@ -10,7 +10,7 @@ The model uses two tools: `listModules` returns stable absolute package roots fo
 
 `TSFuncExecutor` calls `main(input)` and returns `{ value, stdout, stderr, durationMs }`. `ProcExecutor` calls no-argument `main()`, requires it to resolve to exactly `undefined`, and returns exact stdout. Proc stderr is captured for failures but intentionally discarded on success; it is never merged into stdout.
 
-Minimal v1 deliberately provides no security sandbox. It also excludes custom loaders, alternate runtime backends, source modules, package installation, persistent language services, cross-restart disk caches, execution cancellation or timeouts, environment filtering, multi-file user programs, process pools, and process-tree management.
+Executions accept an `AbortSignal`, a wall-clock deadline, and a per-stream output cap; abort or timeout terminates the guest process group and rejects with `ExecutionAbortedError`, and output beyond the cap is discarded and flagged. Minimal v1 deliberately provides no security sandbox. It also excludes custom loaders, alternate runtime backends, source modules, package installation, persistent language services, cross-restart disk caches, environment filtering, multi-file user programs, and process pools.
 
 `hostFunction` defines a schema-checked host callback; `hostModule` generates its typed proxy package once for reuse across discovery, checks, and fresh executions. Artifacts live under `.ts-executor/modules/` until explicit module disposal; isolated operation files live under `.ts-executor/runs/` and are cleaned after each operation. Host callbacks retain host state and use an execution-scoped JSON IPC channel; host effects are not transactional.
 
@@ -28,5 +28,6 @@ Minimal v1 deliberately provides no security sandbox. It also excludes custom lo
 - [Decision 0004: Model discovery and execution](decisions/0004-model-discovery-and-execution.md) — Two model tools provide package paths and TypeScript execution; harness helpers stay outside the model instructions.
 
 - [Decision 0005: Reusable host-backed modules](decisions/0005-reusable-host-backed-modules.md) — Schema-backed host functions use reusable physical packages and execution-scoped IPC without reusing child state.
+- [Decision 0006: Cancellation and bounded output](decisions/0006-cancellation-and-bounded-output.md) — Executions accept a signal, a wall-clock deadline, and a per-stream retention cap; the guest process group is terminated on abort or timeout, and output is captured through pipes into bounded buffers.
 
 The `plans/` and `experiment_journal/` directories are managed by the project workflow.

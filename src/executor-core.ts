@@ -3,13 +3,17 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { instructionsFor } from "./agent-instructions.js";
 import { checkWorkspace } from "./check.js";
-import { TypeCheckError } from "./errors.js";
+import { ExecutionAbortedError, TypeCheckError } from "./errors.js";
 import { acquireHostModules, assertHostModulesOpen } from "./host-bindings.js";
+import { pendingAbort, resolveControl, type ResolvedControl } from "./limits.js";
 import { ModuleRegistry } from "./registry.js";
 import type {
+  AbortReason,
   CheckRequest,
   CheckResult,
+  ExecutionControl,
   ExecutorOptions,
+  InstructionsOptions,
   ListModulesRequest,
   ModuleSummary,
 } from "./types.js";
@@ -17,10 +21,21 @@ import { prepareWorkspace, removeWorkspace, type PreparedWorkspace } from "./wor
 
 const IntrinsicURL = URL;
 
-interface SharedExecuteRequest {
+interface SharedExecuteRequest extends ExecutionControl {
   readonly source: string;
   readonly cwd: string | URL;
   readonly check?: boolean;
+}
+
+function abortedBeforeStart(reason: AbortReason, control: ResolvedControl): ExecutionAbortedError {
+  return new ExecutionAbortedError(reason, {
+    stdout: "",
+    stderr: "",
+    truncated: Object.freeze({ stdout: false, stderr: false }),
+    exitCode: null,
+    signal: null,
+    durationMs: performance.now() - control.startedAt,
+  });
 }
 
 function attachCleanupError(primary: unknown, cleanup: unknown): void {
@@ -105,16 +120,16 @@ async function executionCwd(value: string | URL | undefined): Promise<string> {
 
 export class ExecutorCore {
   readonly modules = new ModuleRegistry();
-  readonly #instructions: string;
+  readonly #executorName: "TSFuncExecutor" | "ProcExecutor";
   readonly #resolutionRoot: string;
 
   constructor(options: ExecutorOptions, executorName: "TSFuncExecutor" | "ProcExecutor") {
-    this.#instructions = instructionsFor(executorName);
+    this.#executorName = executorName;
     this.#resolutionRoot = resolutionRootPath(options?.resolutionRoot, executorName);
   }
 
-  getInstructions(): string {
-    return this.#instructions;
+  getInstructions(options?: InstructionsOptions): string {
+    return instructionsFor(this.#executorName, options);
   }
 
   async listModules(request?: ListModulesRequest): Promise<readonly ModuleSummary[]> {
@@ -147,11 +162,24 @@ export class ExecutorCore {
     }
   }
 
+  /**
+   * The deadline clock starts here. A pre-aborted signal rejects before any lease,
+   * workspace, or check; checking is synchronous and cannot be interrupted, so the
+   * signal and deadline are re-checked once more immediately before spawning.
+   */
   async execute<State, Result>(
     request: SharedExecuteRequest,
     captureFlavorState: () => State,
-    operation: (workspace: PreparedWorkspace, cwd: string, state: State) => Promise<Result>,
+    operation: (
+      workspace: PreparedWorkspace,
+      cwd: string,
+      state: State,
+      control: ResolvedControl,
+    ) => Promise<Result>,
   ): Promise<Result> {
+    const control = resolveControl(request, performance.now());
+    const early = pendingAbort(control, control.startedAt);
+    if (early !== undefined) throw abortedBeforeStart(early, control);
     const snapshot = this.modules.snapshot();
     const host = acquireHostModules(snapshot);
     try {
@@ -163,7 +191,9 @@ export class ExecutorCore {
           const checked = checkWorkspace(workspace);
           if (!checked.ok) throw new TypeCheckError(checked.diagnostics);
         }
-        return operation(workspace, cwd, state);
+        const late = pendingAbort(control, performance.now());
+        if (late !== undefined) throw abortedBeforeStart(late, control);
+        return operation(workspace, cwd, state, control);
       });
     } finally {
       host.release();

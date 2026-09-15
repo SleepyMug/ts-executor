@@ -1,13 +1,26 @@
 import { isAbsolute } from "node:path";
-import { ProcExecutionError, ProcExecutor, TSFuncExecutor, TypeCheckError } from "../dist/index.js";
+import {
+  DEFAULT_MAX_OUTPUT_BYTES,
+  ExecutionAbortedError,
+  ProcExecutionError,
+  ProcExecutor,
+  TSFuncExecutor,
+  TypeCheckError,
+} from "../dist/index.js";
 
 // Example harness code, not an additional executor API. Map these tool definitions
-// and { isError, content } responses to your harness's tool protocol.
-export function createHarnessAdapter(executor) {
+// and { isError, content } responses to your harness's tool protocol. `limits` are
+// harness policy applied to every execution and stated in the instructions; the
+// model cannot change them. Pass the harness's per-call AbortSignal to `callTool`.
+export function createHarnessAdapter(executor, limits = {}) {
   const acceptsInput = executor instanceof TSFuncExecutor;
   if (!acceptsInput && !(executor instanceof ProcExecutor)) {
     throw new TypeError("Expected a TSFuncExecutor or ProcExecutor");
   }
+  const control = {
+    ...(limits.timeoutMs === undefined ? {} : { timeoutMs: limits.timeoutMs }),
+    maxOutputBytes: limits.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+  };
   const tools = [
     {
       name: "listModules",
@@ -38,9 +51,9 @@ export function createHarnessAdapter(executor) {
   ];
 
   return {
-    instructions: executor.getInstructions(),
+    instructions: executor.getInstructions(control),
     tools,
-    async callTool(name, argumentsJson) {
+    async callTool(name, argumentsJson, options = {}) {
       try {
         const tool = tools.find((candidate) => candidate.name === name);
         if (tool === undefined) throw new TypeError(`Unknown tool: ${name}`);
@@ -52,12 +65,22 @@ export function createHarnessAdapter(executor) {
           result = await executor.listModules(args);
         } else {
           if (!isAbsolute(args.cwd)) throw new TypeError("cwd must be an absolute filesystem path");
-          result = await executor.execute({
+          const request = {
             source: args.source,
             cwd: args.cwd,
             ...(Object.hasOwn(args, "input") ? { input: args.input } : {}),
             check: true, // Harness policy; the model cannot supply this option.
-          });
+            ...control,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          };
+          if (acceptsInput) {
+            result = JSON.stringify(await executor.execute(request));
+          } else {
+            const detailed = await executor.executeDetailed(request);
+            result = detailed.truncated.stdout
+              ? `${detailed.stdout}\n[stdout truncated at ${control.maxOutputBytes} bytes]`
+              : detailed.stdout;
+          }
         }
         return { isError: false, content: typeof result === "string" ? result : JSON.stringify(result) };
       } catch (error) {
@@ -94,7 +117,12 @@ function errorDetails(error) {
   for (const stream of ["stdout", "stderr"]) {
     if (typeof error?.[stream] === "string") details[stream] = error[stream];
   }
-  if (error instanceof ProcExecutionError) {
+  if (error?.truncated !== undefined) details.truncated = error.truncated;
+  if (error instanceof ExecutionAbortedError) {
+    details.reason = error.reason;
+    details.durationMs = Math.round(error.durationMs);
+  }
+  if (error instanceof ProcExecutionError || error instanceof ExecutionAbortedError) {
     details.exitCode = error.exitCode;
     details.signal = error.signal;
   }

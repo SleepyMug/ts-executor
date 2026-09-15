@@ -11,8 +11,6 @@ export interface PreparedWorkspace {
   readonly hostBindings: ReadonlyMap<string, HostBinding>;
   readonly entrypoint: string;
   readonly tsconfig: string;
-  readonly stdout: string;
-  readonly stderr: string;
 }
 
 function attachCleanupError(primary: unknown, cleanup: unknown): void {
@@ -110,8 +108,6 @@ export async function prepareWorkspace(
       hostBindings,
       entrypoint,
       tsconfig,
-      stdout: join(root, "stdout.log"),
-      stderr: join(root, "stderr.log"),
     });
   } catch (error) {
     try {

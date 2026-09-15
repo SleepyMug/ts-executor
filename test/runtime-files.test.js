@@ -4,6 +4,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { inputEnvelopeJson, parseResultEnvelope } from "../dist/json-value.js";
+import { resolveControl } from "../dist/limits.js";
 import { parseProcStatusEnvelope } from "../dist/proc-status.js";
 import { runProcProcess } from "../dist/runtime/run-proc.js";
 import { runTSFuncProcess } from "../dist/runtime/run-ts-func.js";
@@ -12,6 +13,7 @@ import { project, workspaceNames } from "./helpers.js";
 
 const require = createRequire(import.meta.url);
 const fsPromises = require("node:fs/promises");
+const control = () => resolveControl({}, performance.now());
 
 test("workspace initialization settles sibling writes before cleanup and preserves failures", async (t) => {
   const root = await project(t);
@@ -94,7 +96,7 @@ test("spawn failures carry captured output and leave cleanup to the executor", a
   );
   try {
     await assert.rejects(
-      runTSFuncProcess(workspace, `${root}/missing-cwd`, inputEnvelopeJson(false, undefined)),
+      runTSFuncProcess(workspace, `${root}/missing-cwd`, inputEnvelopeJson(false, undefined), control()),
       (error) => {
         assert.equal(error?.code, "ENOENT");
         assert.equal(error?.stdout, "");
@@ -108,53 +110,7 @@ test("spawn failures carry captured output and leave cleanup to the executor", a
   assert.deepEqual(await workspaceNames(root), []);
 });
 
-test("output-handle close failures do not mask a primary guest failure", async (t) => {
-  const root = await project(t);
-  const workspace = await prepareWorkspace(
-    root,
-    [],
-    `
-      export function main(): never {
-        console.error("before guest failure");
-        throw new RangeError("guest failure");
-      }
-    `,
-  );
-  const originalOpen = fsPromises.open;
-  const closeFailure = new Error("output close failed");
-  fsPromises.open = async (path, ...args) => {
-    const handle = await originalOpen(path, ...args);
-    if (path === workspace.stdout || path === workspace.stderr) {
-      const close = handle.close.bind(handle);
-      handle.close = async () => {
-        await close();
-        throw closeFailure;
-      };
-    }
-    return handle;
-  };
-  syncBuiltinESMExports();
-
-  try {
-    await assert.rejects(
-      runTSFuncProcess(workspace, root, inputEnvelopeJson(false, undefined)),
-      (error) => {
-        assert.equal(error?.name, "RangeError");
-        assert.equal(error?.message, "guest failure");
-        assert.equal(error?.stderr, "before guest failure\n");
-        assert.equal(error?.cleanupError, closeFailure);
-        return true;
-      },
-    );
-  } finally {
-    fsPromises.open = originalOpen;
-    syncBuiltinESMExports();
-    await removeWorkspace(workspace);
-  }
-  assert.deepEqual(await workspaceNames(root), []);
-});
-
-test("Proc runtime uses only its private status envelope and common output files", async (t) => {
+test("Proc runtime uses only its private status envelope", async (t) => {
   const root = await project(t);
   const workspace = await prepareWorkspace(
     root,
@@ -168,7 +124,9 @@ test("Proc runtime uses only its private status envelope and common output files
   );
 
   try {
-    assert.equal(await runProcProcess(workspace, root), "proc output");
+    const result = await runProcProcess(workspace, root, control());
+    assert.equal(result.stdout, "proc output");
+    assert.deepEqual(result.truncated, { stdout: false, stderr: false });
     const statusPath = join(workspace.root, "proc-status.json");
     assert.deepEqual(parseProcStatusEnvelope(await readFile(statusPath, "utf8")), { ok: true });
     await assert.rejects(
@@ -179,9 +137,10 @@ test("Proc runtime uses only its private status envelope and common output files
       await assert.rejects(stat(join(workspace.root, name)), (error) => error?.code === "ENOENT");
     }
     if (process.platform !== "win32") {
-      for (const path of [statusPath, workspace.stdout, workspace.stderr]) {
-        assert.equal((await stat(path)).mode & 0o777, 0o600, path);
-      }
+      assert.equal((await stat(statusPath)).mode & 0o777, 0o600, statusPath);
+    }
+    for (const name of ["stdout.log", "stderr.log"]) {
+      await assert.rejects(stat(join(workspace.root, name)), (error) => error?.code === "ENOENT");
     }
   } finally {
     await removeWorkspace(workspace);
@@ -206,6 +165,7 @@ test("TSFunc runtime uses private files and atomically replaces the temporary re
       workspace,
       root,
       inputEnvelopeJson(true, { value: 6 }),
+      control(),
     );
     const input = join(workspace.root, "input.json");
     const resultPath = join(workspace.root, "result.json");
@@ -224,8 +184,6 @@ test("TSFunc runtime uses private files and atomically replaces the temporary re
         workspace.tsconfig,
         input,
         resultPath,
-        workspace.stdout,
-        workspace.stderr,
       ]) {
         assert.equal((await stat(path)).mode & 0o777, 0o600, path);
       }

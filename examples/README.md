@@ -3,11 +3,11 @@
 These runnable samples use the repository build and small local fixtures; they need no external services or credentials.
 
 ```sh
-npm install
-npm run examples
+pnpm install
+pnpm run examples
 ```
 
-After `npm run build`, each sample can also run independently:
+After `pnpm run build`, each sample can also run independently:
 
 ```sh
 node examples/01-basic-execution.mjs

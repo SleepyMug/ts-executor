@@ -4,11 +4,11 @@
 
 ## Overview
 
-Each execution owns one mode-`0o700` workspace under `resolutionRoot/.ts-executor/runs/run-<unique>/` and one direct Node subprocess whose native working directory is independently validated `execute.cwd`. There is no shell. A captured graph containing host modules gets one additional IPC descriptor; otherwise there is no message channel. Generated host-package artifacts live independently under their owner's `resolutionRoot/.ts-executor/modules/` until explicit disposal. Command arguments carry only executor-owned code and absolute operation paths. Common stdout/stderr files and raw process termination are flavor-neutral; private input/result/status files belong to a specific fixed bootstrap. This is a lifecycle and serialization boundary, not a security boundary.
+Each execution owns one mode-`0o700` workspace under `resolutionRoot/.ts-executor/runs/run-<unique>/` and one direct Node subprocess, started in its own process group, whose native working directory is independently validated `execute.cwd`. There is no shell. A captured graph containing host modules gets one additional IPC descriptor; otherwise there is no message channel. Generated host-package artifacts live independently under their owner's `resolutionRoot/.ts-executor/modules/` until explicit disposal. Command arguments carry only executor-owned code and absolute operation paths. Bounded stdout/stderr pipe capture, abort/deadline termination, and raw process termination are flavor-neutral; private input/result/status files belong to a specific fixed bootstrap. This is a lifecycle and serialization boundary, not a security boundary.
 
 ## Common Host-to-subprocess Contract
 
-The host opens mode-`0o600` regular `stdout.log` and `stderr.log` files and passes their descriptors as child fd 1 and fd 2. It starts one command equivalent to:
+The host gives the child pipes as fd 1 and fd 2 and drains them into buffers that retain at most `maxOutputBytes` per stream (default 4 MiB); further bytes are consumed and discarded and the stream is flagged `truncated`. It starts one command equivalent to:
 
 ```text
 process.execPath \
@@ -17,9 +17,13 @@ process.execPath \
   <absolute flavor operation paths...>
 ```
 
-No submitted source or JSON value appears in an argument. The host passes normalized request `cwd` to `spawn`. Its environment copies the parent except that preload receives operation `TSX_TSCONFIG_PATH` and one private variable encodes the caller's original present/absent config plus any preexisting private value. Shared bootstrap support restores both before importing guest code.
+No submitted source or JSON value appears in an argument. The host passes normalized request `cwd` and `detached: true` (POSIX) to `spawn`, so the child leads a new process group. Its environment copies the parent except that preload receives operation `TSX_TSCONFIG_PATH` and one private variable encodes the caller's original present/absent config plus any preexisting private value. Shared bootstrap support restores both before importing guest code.
 
-The neutral host primitive waits for direct-child `exit`, closes its output handles, reads both logs, and returns nullable exit code, nullable signal, stdout, and stderr. A failed spawn has no child to reap; post-spawn IPC errors are recorded but do not permit early workspace cleanup or lease release. It does not read or classify a flavor envelope.
+The neutral host primitive waits for direct-child `exit` — never for pipe EOF — then runs one more event-loop poll phase so bytes the child wrote before exiting are read, destroys both pipes (later descendant writes get EPIPE), and returns nullable exit code, nullable signal, both captured streams, per-stream truncation flags, and the abort reason if the host terminated the group. A failed spawn has no child to reap; post-spawn IPC errors are recorded but do not permit early workspace cleanup or lease release. It does not read or classify a flavor envelope.
+
+### Termination on abort or deadline
+
+The caller may pass an `AbortSignal` and a `timeoutMs` deadline measured from the `execute` call. Before spawning, an aborted signal or an elapsed deadline rejects with `ExecutionAbortedError` and nothing is started (the synchronous type-check cannot be interrupted, so the deadline is re-checked after it). After spawning, the host on abort or deadline sends `SIGTERM` to the process group, `SIGKILL` to the group after `killGraceMs` (default 2000 ms), waits for the direct child's exit, drains and destroys the pipes, removes the workspace, releases module leases, and rejects with `ExecutionAbortedError { reason: "signal" | "timeout", stdout, stderr, truncated, exitCode, signal, durationMs }` regardless of any envelope the child may have published. A normal completion never kills the group. Guest effects are not rolled back.
 
 ## TSFunc Protocol
 
@@ -48,7 +52,7 @@ type TSFuncResultEnvelope =
   | { readonly ok: false; readonly error: SerializedError };
 ```
 
-Status 0 must pair with valid success. Nonzero status may pair only with valid error. Missing, malformed, partial, or mismatched files are runtime failures. Successful host output is `{ value, stdout, stderr }`; the public executor adds duration.
+Status 0 must pair with valid success. Nonzero status may pair only with valid error. Missing, malformed, partial, or mismatched files are runtime failures. Successful host output is `{ value, stdout, stderr, truncated }`; the public executor adds duration.
 
 ## Proc Protocol
 
@@ -68,13 +72,13 @@ type ProcStatusEnvelope =
   | { readonly ok: false; readonly error: SerializedError };
 ```
 
-Status 0 must pair with `{ ok: true }`; nonzero reported failure must pair with `{ ok: false, error }`. Success returns the exact stdout file contents. Successful stderr is intentionally discarded and never appended/prepended to stdout. Every classified Proc runtime failure throws `ProcExecutionError` containing captured `stdout`, captured `stderr`, exact `exitCode` (`number | null`), and exact `signal` (`NodeJS.Signals | null`). When the envelope reports a guest error, its useful name, message, and stack become the standard properties of that `ProcExecutionError` instance.
+Status 0 must pair with `{ ok: true }`; nonzero reported failure must pair with `{ ok: false, error }`. Success returns the captured stdout with its truncation flag (`executeDetailed`); the exact-stdout `execute` rejects when stdout was truncated. Successful stderr is intentionally discarded and never appended/prepended to stdout. Every classified Proc runtime failure throws `ProcExecutionError` containing captured `stdout`, captured `stderr`, `truncated`, exact `exitCode` (`number | null`), and exact `signal` (`NodeJS.Signals | null`). When the envelope reports a guest error, its useful name, message, and stack become the standard properties of that `ProcExecutionError` instance.
 
 ## Shared Terminal Publication
 
 Each flavor bootstrap captures stdout/stderr Writable terminal `end` capabilities and `process.exit` before guest import. After its call settles, it first closes the optional host client (rejecting pending calls and disconnecting without awaiting host work), then:
 
-1. invokes each captured terminal `end` capability once, fully uncorking and flushing prior direct-child writes without guest-shadowable cork counters;
+1. invokes each captured terminal `end` capability once, fully uncorking and flushing prior direct-child writes into the host's pipe without guest-shadowable cork counters (on Linux these writes are synchronous, so `end` completes only after the host drained them);
 2. writes its complete envelope to the flavor's mode-`0o600` temporary path;
 3. atomically renames that same-directory file over the final path; and
 4. invokes captured exit with status 0 for success or 1 for a reported error.
@@ -113,9 +117,9 @@ Arbitrary thrown values are manually reduced to safe strings. Class identity and
 
 Spawn failure, signal exit, envelope/status mismatch, early exit, and missing, partial, or malformed envelope are runtime failures. TSFunc reconstructs its existing output-bearing `Error`. Proc normalizes every such post-start classification to `ProcExecutionError`; guest name/message/stack are retained when available. Failures before spawn—input, cwd, materialization, or checking—have no runtime output/termination contract, and checked execution throws `TypeCheckError`.
 
-The host owns workspace, direct child, output handles, and final reads. The core acquires host-module leases synchronously with each operation snapshot and releases them only after workspace cleanup. Module disposal stops new leases and waits existing operations before removing its generated package; run cleanup never removes shared module artifacts. Bootstrap owns publication and direct-child flush ordering. The core removes the workspace in `finally`. Initialization waits for sibling filesystem operations to settle before cleanup; a secondary cleanup failure does not replace a primary error and may appear as best-effort `cleanupError` metadata.
+The host owns workspace, direct child, the pipes and their bounded buffers, the abort/deadline timers, and the process group's termination on abort. The core acquires host-module leases synchronously with each operation snapshot and releases them only after workspace cleanup, including after an abort. Module disposal stops new leases and waits existing operations before removing its generated package; run cleanup never removes shared module artifacts. Bootstrap owns publication and direct-child flush ordering. The core removes the workspace in `finally`. Initialization waits for sibling filesystem operations to settle before cleanup; a secondary cleanup failure does not replace a primary error and may appear as best-effort `cleanupError` metadata.
 
-The executor does not kill or await guest-created descendants. Descendant bytes racing direct-child exit may be present or absent and cannot delay the wait. Direct-child bytes completed before bootstrap flush are guaranteed. Guest code can tamper with operation files and cleanup, so this is not adversarial isolation.
+The executor never awaits guest-created descendants and kills them (as members of the group) only on abort or deadline. Descendant bytes racing direct-child exit may be present or absent and cannot delay the wait. Direct-child bytes completed before bootstrap flush are guaranteed up to `maxOutputBytes` per stream. Guest code can tamper with operation files and cleanup, and a descendant that leaves the process group escapes termination, so this is not adversarial isolation.
 
 ## Host-call Protocol
 
@@ -142,7 +146,7 @@ Calls dispatch concurrently and may complete out of order. Repeated request IDs 
 
 Closing/disconnecting stops new dispatch, aborts the shared host execution signal, and rejects guest pending promises. Eventual host rejections are observed and replies discarded after close. Main must await its host calls before returning: queued/unawaited effects are not guaranteed, and already-running handlers may continue after child exit or module disposal. Neither child failure nor disconnect rolls back effects. There are no retries, per-call deadlines, streaming, remote object handles, or forced host-work cancellation.
 
-Both bootstraps initialize the client before guest import and close it before terminal publication. The bridge does not change stdout/stderr semantics, require a listening server, or extend direct-child ownership to descendants. See the [IPC journal](../experiment_journal/node-child-process-ipc.md) for tested runtime behavior and [host functions](../components/host-functions/index.md#provided-apis) for the supported schema contract.
+Both bootstraps initialize the client before guest import and close it before terminal publication. The bridge does not change stdout/stderr semantics, require a listening server, or extend direct-child ownership to descendants. On abort the bridge is closed after the child exits, so the shared host-call signal fires and pending guest calls are rejected. See the [IPC journal](../experiment_journal/node-child-process-ipc.md) for tested runtime behavior and [host functions](../components/host-functions/index.md#provided-apis) for the supported schema contract.
 
 ## Resolution and cwd
 
