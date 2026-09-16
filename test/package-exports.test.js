@@ -243,7 +243,7 @@ test("the packed public package has the intended files, declarations, and consum
       };
       const stdout: Promise<string> = proc.execute(procRequest);
       const detailed: Promise<ProcExecuteResult> = proc.executeDetailed(procRequest);
-      const control: ExecutionControl = { timeoutMs: 1000, maxOutputBytes: 1024, signal: new AbortController().signal };
+      const control: ExecutionControl = { timeoutMs: 1000, maxOutputBytes: 1024, signal: new AbortController().signal, killGroupOnExit: true };
       void executor.execute({ ...tsFuncRequest, ...control });
       // @ts-expect-error timeoutMs is a number.
       void proc.execute({ ...procRequest, timeoutMs: "1s" });

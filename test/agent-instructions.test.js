@@ -57,6 +57,8 @@ test("instructions state the effective limits deterministically", () => {
   assert.match(tsFunc.getInstructions({ timeoutMs: 60_000 }), /within 1 minute of/u);
   assert.match(tsFunc.getInstructions({ timeoutMs: 1500 }), /within 1500 ms of/u);
   assert.match(tsFunc.getInstructions({ maxOutputBytes: 1000 }), /up to 1000 bytes/u);
+  assert.match(tsFunc.getInstructions({ killGroupOnExit: true }), /killed when the program finishes/u);
+  assert.doesNotMatch(defaults, /killed when the program finishes/u);
   assert.notEqual(limited, defaults);
 });
 

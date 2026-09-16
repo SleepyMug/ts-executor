@@ -69,6 +69,11 @@ function limitsSegment(executorName: ExecutorName, options: InstructionsOptions 
       `- Each execution must finish within ${formatDuration(options.timeoutMs)} of wall-clock time including type-checking; afterwards the program and every process it started are killed and the call fails with the output captured so far. Give your own child processes shorter deadlines.`,
     );
   }
+  if (options?.killGroupOnExit === true) {
+    lines.push(
+      "- Processes the program started are killed when the program finishes; do not rely on background processes outliving a call.",
+    );
+  }
   lines.push(
     "- If the call is cancelled or times out, effects the program already had are not rolled back.",
   );

@@ -89,6 +89,13 @@ export interface ExecutionControl {
   readonly maxOutputBytes?: number;
   /** Milliseconds between SIGTERM and SIGKILL on abort/timeout. Defaults to `DEFAULT_KILL_GRACE_MS`. */
   readonly killGraceMs?: number;
+  /**
+   * After the guest exits normally and its output is captured, SIGKILL whatever is
+   * left in its process group (best effort) so leftover children do not outlive the
+   * execution. Defaults to false: descendants survive a normal exit. A descendant
+   * that moved to its own session (e.g. `detached: true`) is out of reach either way.
+   */
+  readonly killGroupOnExit?: boolean;
 }
 
 export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> extends ExecutionControl {
@@ -129,6 +136,8 @@ export interface InstructionsOptions {
   readonly timeoutMs?: number;
   /** The per-stream retention cap the harness passes; defaults to `DEFAULT_MAX_OUTPUT_BYTES`. */
   readonly maxOutputBytes?: number;
+  /** Whether the harness passes `killGroupOnExit`, so the model knows started processes end with the program. */
+  readonly killGroupOnExit?: boolean;
 }
 
 export interface PackageModuleOptions {

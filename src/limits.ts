@@ -13,6 +13,13 @@ export interface ResolvedControl {
   readonly deadlineAt: number | undefined;
   readonly maxOutputBytes: number;
   readonly killGraceMs: number;
+  readonly killGroupOnExit: boolean;
+}
+
+function booleanOption(value: unknown, label: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw new TypeError(`${label} must be a boolean`);
+  return value;
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -41,6 +48,7 @@ export function resolveControl(control: ExecutionControl, startedAt: number): Re
     killGraceMs: control.killGraceMs === undefined
       ? DEFAULT_KILL_GRACE_MS
       : positiveInteger(control.killGraceMs, "execute.killGraceMs"),
+    killGroupOnExit: booleanOption(control.killGroupOnExit, "execute.killGroupOnExit"),
   });
 }
 

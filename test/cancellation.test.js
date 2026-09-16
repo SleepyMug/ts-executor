@@ -181,6 +181,41 @@ for (const Flavor of [TSFuncExecutor, ProcExecutor]) {
   });
 }
 
+for (const Flavor of [TSFuncExecutor, ProcExecutor]) {
+  test(`${Flavor.name}: killGroupOnExit reaps children left behind by a normal exit; default keeps them`, { timeout: 30_000 }, async (t) => {
+    const root = await project(t);
+    const executor = new Flavor({ resolutionRoot: root });
+    const source = (pidFile) => `
+      import { spawn } from "node:child_process";
+      import { writeFileSync } from "node:fs";
+      export function ${Flavor === TSFuncExecutor ? "main(): number" : "main(): void"} {
+        const child = spawn("sleep", ["300"], { stdio: "ignore" });
+        child.unref();
+        writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+        ${Flavor === TSFuncExecutor ? "return 1;" : ""}
+      }
+    `;
+
+    const keptFile = join(root, "kept.pid");
+    await executor.execute({ cwd: root, check: false, source: source(keptFile) });
+    const keptPid = Number(await readFile(keptFile, "utf8"));
+    t.after(() => { try { process.kill(keptPid, "SIGKILL"); } catch { /* already gone */ } });
+    assert.equal(alive(keptPid), true, "0.2.0 semantics: a normal exit leaves children alone");
+
+    const reapedFile = join(root, "reaped.pid");
+    await executor.execute({ cwd: root, check: false, killGroupOnExit: true, source: source(reapedFile) });
+    const reapedPid = Number(await readFile(reapedFile, "utf8"));
+    await delay(50);
+    assert.equal(alive(reapedPid), false, "killGroupOnExit must reap the leftover child");
+    assert.deepEqual(await workspaceNames(root), []);
+
+    await assert.rejects(
+      executor.execute({ cwd: root, source: source(reapedFile), killGroupOnExit: "yes" }),
+      (error) => error instanceof TypeError && error.message.includes("killGroupOnExit"),
+    );
+  });
+}
+
 test("aborting releases host-module leases so disposal completes", { timeout: 30_000 }, async (t) => {
   const root = await project(t);
   const module = await hostModule({

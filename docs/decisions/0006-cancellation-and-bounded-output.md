@@ -34,3 +34,20 @@ An agent harness runs model-written programs. A program whose `main` never settl
 - Node's synchronous pipe writes on Linux mean a guest blocks while the host is not draining, for example during another execution's synchronous type-check in the same host process. This slows the guest; it cannot deadlock because the host always resumes draining.
 - Process-group termination is POSIX behaviour; on Windows only the direct child is killed.
 - The library still provides no security boundary, environment filtering, or resource limits beyond output retention.
+
+## Amendment (0.2.1): optional group reaping after a normal exit
+
+0.2.0 terminated the guest's process group only on abort or deadline, so a
+program that started a background process and then returned normally leaked it
+for the host process's lifetime. Harnesses that treat each execution as a unit
+of work (agui's agent runs one per model tool call) need that bounded, while
+callers who deliberately start long-lived helpers must not have them killed.
+
+Add `killGroupOnExit?: boolean` to `ExecutionControl`, defaulting to **false**
+so 0.2.0 semantics are unchanged. When set, the neutral primitive SIGKILLs the
+remainder of the exited child's process group after the direct child's `exit`
+and after output capture — never before, so reaping cannot truncate the child's
+own bytes — and before workspace cleanup; `ESRCH` is ignored. `getInstructions`
+states it, so a model that starts processes learns they end with the program.
+A descendant that left the group (its own `setsid`/`detached`) escapes either
+way, which remains a documented limit rather than a security boundary.

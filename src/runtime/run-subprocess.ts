@@ -123,8 +123,9 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
     } else {
       process.kill(-pid, signal);
     }
-  } catch {
-    // The group leader may already be gone; a direct kill is the best remaining effort.
+  } catch (error) {
+    // ESRCH: no member of the group remains. Anything else: fall back to the direct child.
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
     try {
       child.kill(signal);
     } catch {
@@ -220,7 +221,12 @@ export async function runSubprocess(
       });
     }
     outcome = await waitForExit(child);
-    if (child.pid !== undefined) await drainAfterExit();
+    if (child.pid !== undefined) {
+      await drainAfterExit();
+      // Opt-in reaping of children the guest left behind: the leader is gone, so
+      // this only reaches remaining members of its group (ESRCH when none remain).
+      if (control.killGroupOnExit) killGroup(child, "SIGKILL");
+    }
   } catch (error) {
     outcome = {
       exitCode: null,
