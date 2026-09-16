@@ -26,7 +26,7 @@ const require = createRequire(import.meta.url);
 const tsxImport = require.resolve("tsx");
 const RESTORE_ENVIRONMENT = "__TS_EXECUTOR_RESTORE_ENVIRONMENT";
 
-function environment(workspace: PreparedWorkspace): NodeJS.ProcessEnv {
+function environment(workspace: PreparedWorkspace, control: ResolvedControl): NodeJS.ProcessEnv {
   const state = {
     ...(process.env.TSX_TSCONFIG_PATH === undefined
       ? {}
@@ -35,8 +35,12 @@ function environment(workspace: PreparedWorkspace): NodeJS.ProcessEnv {
       ? {}
       : { privateValue: process.env[RESTORE_ENVIRONMENT] }),
   };
+  // The caller's additions sit between the inherited environment and the executor's
+  // own variables, so they can shadow an inherited value but never the two names the
+  // bootstrap needs. `resolveControl` rejects those names as well; this is belt and braces.
   return {
     ...process.env,
+    ...control.env,
     TSX_TSCONFIG_PATH: workspace.tsconfig,
     [RESTORE_ENVIRONMENT]: JSON.stringify(state),
   };
@@ -199,7 +203,7 @@ export async function runSubprocess(
       ["--import", tsxImport, bootstrap, ...arguments_],
       {
         cwd,
-        env: environment(workspace),
+        env: environment(workspace, control),
         // Own process group so abort/timeout can terminate guest descendants too.
         detached: process.platform !== "win32",
         stdio: workspace.hostBindings.size === 0

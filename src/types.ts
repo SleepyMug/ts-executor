@@ -96,6 +96,16 @@ export interface ExecutionControl {
    * that moved to its own session (e.g. `detached: true`) is out of reach either way.
    */
   readonly killGroupOnExit?: boolean;
+  /**
+   * Extra environment variables for this one guest, merged over the inherited
+   * environment. The host's own `process.env` is never modified, so concurrent
+   * executions cannot observe each other's values. Keys must be non-empty and free
+   * of `=` and NUL; values must be strings without NUL. The executor's own variables
+   * (`TSX_TSCONFIG_PATH` and its private restore variable) may not be overridden —
+   * naming one throws rather than being ignored. This adds variables; it does not
+   * remove or filter inherited ones.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> extends ExecutionControl {

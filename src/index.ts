@@ -1,6 +1,6 @@
 export { ExecutionAbortedError, ProcExecutionError, TypeCheckError } from "./errors.js";
 export type { CapturedTermination } from "./errors.js";
-export { DEFAULT_KILL_GRACE_MS, DEFAULT_MAX_OUTPUT_BYTES } from "./limits.js";
+export { DEFAULT_KILL_GRACE_MS, DEFAULT_MAX_OUTPUT_BYTES, RESERVED_ENVIRONMENT_NAMES } from "./limits.js";
 export { packageModule } from "./modules/package-module.js";
 export { Type } from "@sinclair/typebox";
 export { hostFunction } from "./host-function.js";

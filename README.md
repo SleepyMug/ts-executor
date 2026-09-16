@@ -135,9 +135,17 @@ Both executors expose `listModules` and `execute` for the model, plus `getInstru
 
 ## Cancellation and output limits
 
-Both `execute` methods accept `signal` (an `AbortSignal`), `timeoutMs` (a wall-clock deadline measured from the call, covering type-checking), `maxOutputBytes` (bytes retained per stream; default `DEFAULT_MAX_OUTPUT_BYTES`, 4 MiB), `killGraceMs` (default `DEFAULT_KILL_GRACE_MS`, 2 s), and `killGroupOnExit` (default false). Aborting or exceeding the deadline sends SIGTERM to the guest's whole process group, SIGKILL after the grace period, waits for the direct child, cleans the run workspace, and rejects with `ExecutionAbortedError`, which carries `reason` (`"signal"` or `"timeout"`), the output captured so far, `truncated`, `exitCode`, `signal`, and `durationMs`. A pre-aborted signal rejects before anything is spawned. Effects the program already had are not rolled back.
+Both `execute` methods accept `signal` (an `AbortSignal`), `timeoutMs` (a wall-clock deadline measured from the call, covering type-checking), `maxOutputBytes` (bytes retained per stream; default `DEFAULT_MAX_OUTPUT_BYTES`, 4 MiB), `killGraceMs` (default `DEFAULT_KILL_GRACE_MS`, 2 s), `killGroupOnExit` (default false), and `env`. Aborting or exceeding the deadline sends SIGTERM to the guest's whole process group, SIGKILL after the grace period, waits for the direct child, cleans the run workspace, and rejects with `ExecutionAbortedError`, which carries `reason` (`"signal"` or `"timeout"`), the output captured so far, `truncated`, `exitCode`, `signal`, and `durationMs`. A pre-aborted signal rejects before anything is spawned. Effects the program already had are not rolled back.
 
 `killGroupOnExit: true` additionally SIGKILLs whatever remains in the guest's process group after a NORMAL exit, once its output is captured, so a program that starts a background process does not leak it. It defaults to false, which keeps such descendants running after the execution resolves. A descendant that moved to its own session is out of reach either way.
+
+`env` supplies extra variables for one guest, merged over the inherited environment:
+
+```ts
+await executor.execute({ source, cwd, env: { RUN_ID: "call-7" } });
+```
+
+The host's own `process.env` is never modified, so concurrent executions cannot observe each other's values and nothing leaks into a later run. A name may shadow an inherited variable but not one of `RESERVED_ENVIRONMENT_NAMES` — the executor's `TSX_TSCONFIG_PATH` and its private restore variable, which the bootstrap needs to rebuild the caller's original `tsx` configuration; naming either throws rather than being ignored. Names must be non-empty and free of `=` and NUL, values strings without NUL. This adds variables; it does not remove or filter inherited ones, so it is not a sandbox (see [Decision 0007](docs/decisions/0007-per-execution-environment.md)).
 
 ```ts
 const controller = new AbortController();
@@ -163,4 +171,4 @@ pnpm run examples
 
 See [`examples/`](examples/README.md) for both execution flavors, physical packages, and a package-native network client.
 
-Execution is not sandboxed. Subprocesses retain normal Node filesystem, network, built-in-module, environment, and child-process authority. The executor waits only for its direct child; it terminates the child's process group on abort or timeout, and after a normal exit only when `killGroupOnExit` is set, and provides no environment filtering, custom loader, or process pool. See [`docs/`](docs/index.md) for complete contracts.
+Execution is not sandboxed. Subprocesses retain normal Node filesystem, network, built-in-module, environment, and child-process authority. The executor waits only for its direct child; it terminates the child's process group on abort or timeout, and after a normal exit only when `killGroupOnExit` is set, and provides no environment *filtering* (`env` only adds variables), custom loader, or process pool. See [`docs/`](docs/index.md) for complete contracts.

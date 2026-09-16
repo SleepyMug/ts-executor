@@ -1,6 +1,6 @@
 {
   "name": "@sleepymug/ts-executor",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Execute checked TypeScript as JSON functions or stdout processes in fresh Node subprocesses.",
   "type": "module",
   "exports": {
