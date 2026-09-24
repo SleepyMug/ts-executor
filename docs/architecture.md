@@ -1,36 +1,35 @@
 # Architecture
 
-> Two public execution flavors compose shared agent guidance and one catalog/check/workspace core with a neutral subprocess primitive over a shared physical package graph.
+> One executor composes agent guidance, catalog, checking, workspaces, and a single subprocess runner over a shared physical package graph.
 
 ## Overview
 
-`TSFuncExecutor` and `ProcExecutor` each own a small internal `ExecutorCore` by composition; there is no public or internal executor base class. The core owns the module registry and coordinates immutable operation snapshots, deterministic agent-instruction assembly, module listing, strict checking, cwd validation, common workspace preparation, and cleanup. Public flavor classes delegate those shared operations and supply only their execution-specific preparation and interpretation. The model-facing surface is `listModules` and `execute`; harness code uses registration, `check`, and `getInstructions`. Agent instructions describe only discovery and execution with the selected executor's contract.
+`TSFuncExecutor` is the only executor. It owns the module registry and coordinates immutable operation snapshots, fixed agent instructions, module listing, strict checking, control and cwd validation, workspace preparation, execution, and cleanup. The model-facing surface is `listModules` and `execute`; harness code uses registration, `check`, and `getInstructions`. Agent instructions describe only discovery and execution and state no limits.
 
-`listModules` returns captured metadata with a stable absolute `packageRoot` for each package. The model reads `package.json` and declarations through filesystem access supplied by the harness. Discovery performs no materialization or declaration traversal. Each operation gets a workspace at `resolutionRoot/.ts-executor/runs/run-<unique>/` containing `main.ts`, `tsconfig.json`, package metadata, module materialization space, and its own physical `node_modules` graph. Host-module artifacts are generated once below their chosen `resolutionRoot/.ts-executor/modules/` and linked into runs; shared scaffolding remains after run cleanup. Checking uses strict ES2022, Node-only NodeNext options against the same graph.
+`listModules` returns captured metadata with a stable absolute `packageRoot` for each package. The model reads `package.json` and declarations through filesystem access supplied by the harness. Discovery performs no materialization or declaration traversal. Each operation gets a workspace at `resolutionRoot/.ts-executor/runs/run-<unique>/` containing `main.ts`, `tsconfig.json`, package metadata, module materialization space, and its own physical `node_modules` graph. Host-module artifacts are generated once below their chosen `resolutionRoot/.ts-executor/modules/` and linked into runs; shared scaffolding remains after run cleanup. Checking uses strict ES2022, Node-only NodeNext options against the same graph, synchronously in the caller's process.
 
-Execution calls one neutral primitive that spawns `process.execPath` in its own process group with the executor-owned `tsx` preload, a selected compiled bootstrap, and absolute operation paths, draining stdout and stderr pipes into buffers bounded by `maxOutputBytes`. The primitive returns exit code, signal, both captured streams with truncation flags, and whether the host terminated the group on abort or deadline, without interpreting flavor status. Separate host runners and compiled bootstraps implement the two contracts:
+Execution writes a strict-JSON input envelope and calls one subprocess primitive that spawns `process.execPath` in its own process group with the executor-owned `tsx` preload, the compiled `ts-func-subprocess.js` bootstrap, and absolute operation paths. A signal that aborted before this point (during workspace preparation, checking, or file preparation) starts nothing. stdout and stderr are piped only when the caller supplied `onStdout`/`onStderr`, and are delivered to those sinks as UTF-8 text; nothing is retained. An abort or a throwing sink first closes the host-call bridge, then signals the group; an abort after the child's exit is observed does not count. The primitive returns exit code, signal, whether the caller's signal aborted, and any process or sink error. The TSFunc runner then interprets the private result envelope:
 
-- `TSFuncExecutor` writes a strict-JSON input envelope, calls `main(input)`, validates a strict-JSON value, and interprets a private result envelope.
-- `ProcExecutor` calls `main()` with no arguments, requires its resolved value to be exactly `undefined`, and interprets a private status/error envelope. Its successful value is only exact captured stdout.
+- the bootstrap calls `main(input)`, validates a strict-JSON value or serializes a thrown error, flushes output, atomically publishes the envelope, and invokes a captured exit;
+- the runner throws `ExecutionAbortedError` when the caller aborted, otherwise checks status/envelope agreement and returns the value or the deserialized guest error.
 
-Both bootstraps flush direct-child output, atomically publish their flavor envelope, invoke a captured exit capability, and leave cleanup to the core. A registry mutation after an operation starts cannot alter that operation's membership, captured metadata, or host dispatch table. Host-module leases are acquired synchronously with the snapshot and released only after operation cleanup. Each execution has a fresh process, heap, module cache, and child package-singleton state; host callbacks retain host-owned state.
+A registry mutation after an operation starts cannot alter that operation's membership, captured metadata, or host dispatch table. Host-module leases are acquired synchronously with the snapshot and released only after operation cleanup. Each execution has a fresh process, heap, module cache, and child package-singleton state; host calls retain host-owned state.
 
 ## Dependency Direction
 
 ```text
-TSFuncExecutor ─┐
-                ├─> ExecutorCore ─> agent-instruction segments
-ProcExecutor ───┘        ├───────> registry/materializers ─> physical package graph
-                         ├───────> TypeScript NodeNext resolver/compiler
-                         └───────> common workspace lifecycle
-
-TSFuncExecutor ─> TSFunc host runner ─┐
-                                     ├─> neutral spawn primitive ─> fresh Node subprocess
-ProcExecutor ───> Proc host runner ───┘          ├─> TSFunc bootstrap/result protocol
-                                                 └─> Proc bootstrap/status protocol
+TSFuncExecutor ─> agent instructions (fixed text)
+       ├───────> control validation (signal, env, sinks)
+       ├───────> registry/materializers ─> physical package graph
+       ├───────> TypeScript NodeNext resolver/compiler
+       ├───────> workspace lifecycle
+       └───────> TSFunc runner ─> subprocess primitive ─> fresh Node subprocess
+                                        │                  └─> TSFunc bootstrap/result protocol
+                                        ├─> output sinks (caller)
+                                        └─> host-call bridge ─> hostModule call (caller)
 ```
 
-The registry supports discovery and workspace materialization; it is not an import allowlist. Built-ins and ambient packages reachable from the workspace remain available. Network clients still require no executor-specific integration: registered declaration-bearing client packages establish their own connections in each subprocess. For live host-owned capabilities, `hostFunction` captures TypeBox schemas and handlers; `hostModule` generates declarations and proxies once. When a snapshot includes host modules, the spawn primitive attaches one JSON-text IPC channel, dispatching only captured module identities and methods. Both bootstraps initialize the same compiled guest client before guest import. Completion disconnects the bridge before the existing output flush and terminal publication. Calls may run concurrently; disconnect aborts a cooperative host signal but never waits for arbitrary host work or retries effects.
+The registry supports discovery and workspace materialization; it is not an import allowlist. Built-ins and ambient packages reachable from the workspace remain available. Network clients require no executor-specific integration: registered declaration-bearing client packages establish their own connections in each subprocess. For live host-owned capabilities, `hostModule` writes caller-supplied declarations and generated forwarders once. When a snapshot includes host modules, the primitive attaches one JSON-text IPC channel, dispatching only captured module identities and their listed function names to the caller's `call`. The bootstrap initializes the guest client before guest import. Completion disconnects the bridge before the output flush and terminal publication; an abort or a throwing sink closes it from the host side before the group is signalled. Calls may run concurrently; disconnect aborts a cooperative host signal but never waits for arbitrary host work or retries effects.
 
 ## Resolution and Working-directory Split
 
@@ -44,12 +43,17 @@ Resolution follows ordinary NodeNext behavior:
 
 ## v1 Scope
 
-Programs are one source string exporting synchronous or asynchronous `main`. They run with the host Node process's normal authority: this is a lifecycle boundary, not a security boundary. Top-level JSON input/value belongs to `TSFuncExecutor`; `ProcExecutor` has no input or returned program value. Host-call arguments/results use strict JSON in both flavors. There is one subprocess mechanism with two fixed bootstraps and an optional host-call bridge. Executions accept an `AbortSignal`, a wall-clock `timeoutMs`, and a per-stream `maxOutputBytes` cap; abort or deadline terminates the guest process group (SIGTERM, then SIGKILL after `killGraceMs`) and rejects with `ExecutionAbortedError` ([Decision 0006](decisions/0006-cancellation-and-bounded-output.md)). Output is captured through pipes into bounded buffers; the host waits only for direct-child exit. Executions may also add per-guest environment variables ([Decision 0007](decisions/0007-per-execution-environment.md)). There is no public mode flag, execution-plugin abstraction, custom loader, VM backend, package installer, source-module abstraction, environment *filtering*, process pool, descendant manager beyond group termination on abort, runtime package allowlist, multi-file user program, or cross-restart disk cache. Host-call AbortSignal notification is cooperative and separate from execution cancellation.
+- Programs are one source string exporting synchronous or asynchronous `main`. Input and result are strict JSON; a `main` that returns nothing resolves to `null`, so a stdout-style program just prints.
+- Programs run with the host Node process's normal authority: this is a lifecycle boundary, not a security boundary.
+- One subprocess mechanism, one fixed bootstrap, and an optional host-call bridge. Host-call arguments/results are strict JSON; there is no schema validation.
+- Limits are the caller's ([Decision 0008](decisions/0008-one-executor-callers-own-limits-host-modules-carry-declarations.md)). Aborting the caller's `AbortSignal` closes the host-call bridge, then terminates the guest process group (SIGTERM, then SIGKILL after a fixed 2 s grace), and rejects with `ExecutionAbortedError`; an abort after the guest exited does not count. Output goes to caller sinks and is never retained. The host waits only for direct-child exit, then kills what remains of the group.
+- Trust model: the caller and its host-module `call` functions are trusted; the program is untrusted for correctness but not contained. The executor imposes no resource budgets, caps, or rate limits and has no mechanisms that exist only to survive a hostile program; an expensive type-check runs in the caller's process, a result is read whole, and a guest can write raw bytes to its IPC descriptor. Resource use is for the caller and the environment to limit and monitor.
+- Executions may add per-guest environment variables ([Decision 0007](decisions/0007-per-execution-environment.md)).
+- Not provided: built-in deadlines or output caps, a second execution flavor, public mode flags or execution plugins, custom loaders, VM backends, package installers, source-module abstractions, environment *filtering*, process pools, descendant management beyond group termination, runtime package allowlists, multi-file user programs, or cross-restart disk caches. Host-call AbortSignal notification is cooperative and separate from execution cancellation.
 
 ## Sub-documents
 
-- [Executor component](components/executor/index.md) — `TSFuncExecutor` and `ProcExecutor` provide agent guidance and compose shared catalog, checking, workspace, cwd, and cleanup orchestration while enforcing separate execution contracts.
-- [Modules component](components/modules/index.md) — Modules expose existing packages or reusable generated packages backed by host-owned functions through ordinary ESM imports.
-- [Host functions component](components/host-functions/index.md) — Immutable TypeBox contracts supply inferred host handlers, strict JSON validation, and generated asynchronous guest declarations.
-- [Runtime component](components/runtime/index.md) — A neutral spawn primitive supports separate JSON-function and stdout-process bootstraps and host-side interpreters.
-- [Host-subprocess execution boundary](boundaries/host-subprocess-execution.md) — Common process lifecycle and regular-file output capture carry separate private TSFunc result and Proc status protocols.
+- [Executor component](components/executor/index.md) — `TSFuncExecutor` provides agent guidance and orchestrates catalog, checking, workspace, cwd, control validation, and cleanup around the JSON function contract.
+- [Modules component](components/modules/index.md) — Modules expose existing packages, or reusable generated packages whose functions forward JSON arguments to a host `call` function, through ordinary ESM imports.
+- [Runtime component](components/runtime/index.md) — A subprocess primitive streams output to caller sinks, closes the host-call bridge and terminates the process group on abort, reaps it after exit, and carries the JSON function bootstrap and host-call bridge.
+- [Host-subprocess execution boundary](boundaries/host-subprocess-execution.md) — Process lifecycle, sink-delivered output, the private TSFunc result protocol, and the host-call protocol.

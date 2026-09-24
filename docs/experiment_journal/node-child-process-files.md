@@ -1,6 +1,6 @@
 # Node Child-process File Execution
 
-> Records plain `spawn()` startup, regular-file output, atomic result, environment, and reaping behavior used by the subprocess backend.
+> Records plain `spawn()` startup, regular-file output, atomic result, environment, reaping, and type-check subprocess behavior used by the subprocess backend.
 
 ## Overview
 
@@ -107,3 +107,45 @@ Also observed while testing: a guest whose only pending work is an unresolved pr
 
 - Probe scripts: `/tmp/tsx-probe/parent.mjs`, `/tmp/tsx-probe/child.mjs`, `/tmp/tsx-probe/kill.mjs` (not retained).
 - Implementation: `src/runtime/run-subprocess.ts`; tests: `test/cancellation.test.js`, `test/output-limits.test.js`.
+
+## 2026-09-24: Type-checking in a child process: cost, termination, and out-of-memory
+
+### Context
+
+A review found that `checkWorkspace` ran TypeScript synchronously in the caller's process, so an expensive type blocked the caller's event loop or exhausted its heap. Moving the check into its own Node subprocess needed three facts on Node v24.15.0, Linux x64, TypeScript 5.9.3: what an expensive type does, whether a busy check child dies promptly on SIGTERM, and what the move costs per check.
+
+### Finding
+
+- A program whose return type is a permutation of 9 union members (`type Permutation<T, U = T> = [T] extends [never] ? [] : T extends U ? [T, ...Permutation<Exclude<U, T>>] : never`) ran the checker for about 12 s and then ended the process with V8's "JavaScript heap out of memory" fatal error at about 4 GB (SIGABRT, shell status 134). 8 members took 3.5 s and produced an ordinary TS2322 diagnostic; 7 took 0.6 s.
+- With `NODE_OPTIONS=--max-old-space-size=128` inherited by the check child, the 9-member check died with signal SIGABRT after about 0.7 s and published nothing. A trivial check succeeds with 64 MB.
+- SIGTERM to the group of a check child busy in the checker ended it at once: Node installs no SIGTERM handler, so the default disposition applies even during synchronous JavaScript.
+- A trivial check through a child took about 385 ms end to end (Node start, loading `typescript.js`, parsing `lib.es2022.d.ts` and `@types/node`, all cold). The same check in a warm process took about 120 ms (220 ms the first time, plus about 110 ms to load TypeScript). With `NODE_COMPILE_CACHE` set, the child took about 325 ms.
+- TypeScript is CommonJS: imported from ESM it still appears in `require.cache`, which is how a test shows the caller never loaded it.
+
+### Implications
+
+- A check in a child process can be killed by the same SIGTERM-then-SIGKILL group termination as a guest, and SIGTERM suffices. A check that runs out of memory then kills only its child.
+- Each check would cost about a quarter of a second more than a warm in-process check.
+- Outcome: a type-check subprocess was built on these facts during the 0.4.0 review and then removed when the trust model was set ([Decision 0008](../decisions/0008-one-executor-callers-own-limits-host-modules-carry-declarations.md)). Checking runs in the caller's process, so an expensive type blocks or exhausts the caller; that is left to the environment.
+
+### References
+
+- [Node.js module compile cache](https://nodejs.org/api/module.html#module-compile-cache)
+
+## 2026-09-24: Enabling the compile cache from the type-check bootstrap
+
+### Context
+
+The type-check subprocess pays a cold TypeScript load on every check (entry above). Node 22.1+ can cache compiled code on disk via `module.enableCompileCache(directory)`, which must run before the cached module loads. Node v24.15.0, Linux x64.
+
+### Finding
+
+The check bootstrap calls `module.enableCompileCache("<resolutionRoot>/.ts-executor/compile-cache")` and then imports the TypeScript-loading module dynamically. For a trivial program, the first check under a new resolution root took about 400 ms and later ones about 325 ms, against about 385 ms each without the cache. The cache is written even though the bootstrap ends with `process.exit`. It held about 3 MB, mostly for `typescript.js`.
+
+### Implications
+
+A retained directory under `.ts-executor/` saved about 60 ms per check. Node keys the cache by content and version, so it needs no cleanup, and the check result did not depend on it. Outcome: removed with the type-check subprocess; an in-process check loads TypeScript once per caller process.
+
+### References
+
+- [Node.js module compile cache](https://nodejs.org/api/module.html#module-compile-cache)

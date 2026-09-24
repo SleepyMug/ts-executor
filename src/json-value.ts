@@ -127,18 +127,22 @@ function normalize(
         if (typeof key !== "string") valueError(label, path, "must not have symbol keys");
         reflectApply(arrayPush, stringKeys, [key]);
       }
-      if (stringKeys.length !== value.length + 1 || !includes(stringKeys, "length")) {
+      // Read once: every check below uses the same length.
+      const length: unknown = value.length;
+      if (
+        typeof length !== "number"
+        || stringKeys.length !== length + 1
+        || !includes(stringKeys, "length")
+      ) {
         valueError(label, path, "must be dense and have no extra properties");
       }
 
+      // Own keys are distinct, so "length" plus an own data property at every index
+      // accounts for all of them: the array is dense and has nothing else. Linear time.
       const result: JsonValue[] = [];
-      for (let index = 0; index < value.length; index += 1) {
-        const key = toString(index);
-        if (!includes(stringKeys, key)) {
-          valueError(label, `${path}[${index}]`, "must be present in a dense array");
-        }
+      for (let index = 0; index < length; index += 1) {
         reflectApply(arrayPush, result, [normalize(
-          ownDataValue(value, key, label, `${path}[${index}]`),
+          ownDataValue(value, toString(index), label, `${path}[${index}]`),
           label,
           `${path}[${index}]`,
           ancestors,

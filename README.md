@@ -1,60 +1,69 @@
 # ts-executor
 
-Run strictly checked TypeScript ESM programs in fresh Node subprocesses against ordinary declaration-bearing packages. The package exposes two focused executors with the same module catalog and checking behavior.
+Run strictly checked TypeScript ESM programs in fresh Node subprocesses against ordinary declaration-bearing packages and host-backed modules. One executor, `TSFuncExecutor`, calls `main(input)` and returns its JSON result. Limits are the caller's: it aborts a signal for a deadline and decides how much output to keep.
 
 ## JSON function execution
 
-`TSFuncExecutor` calls sync or async `main(input)` and returns its strict-JSON value plus captured output, truncation flags, and duration.
+`TSFuncExecutor` calls sync or async `main(input)` and returns `{ value, durationMs }`.
 
 ```ts
-import { TSFuncExecutor } from "ts-executor";
+import { TSFuncExecutor } from "@sleepymug/ts-executor";
 
 const executor = new TSFuncExecutor({ resolutionRoot: process.cwd() });
 const result = await executor.execute({
   cwd: process.cwd(),
   source: `
     export function main(input: { name: string }) {
-      console.log("creating greeting");
       return { greeting: \`Hello, \${input.name}!\` };
     }
   `,
   input: { name: "world" },
 });
 
-console.log(result.value, result.stdout, result.stderr, result.truncated, result.durationMs);
+console.log(result.value, result.durationMs);
 ```
 
-Inputs and successful values are strict `JsonValue` data. Non-finite numbers, BigInt, `undefined`, sparse arrays, cycles, symbol keys, functions, accessors, hidden properties, and non-plain objects are rejected rather than coerced. Omitting `input` calls `main(undefined)`.
+Inputs and results are strict `JsonValue` data. Non-finite numbers, BigInt, `undefined`, sparse arrays, cycles, symbol keys, functions, accessors, hidden properties, and non-plain objects are rejected rather than coerced. Omitting `input` calls `main(undefined)`. A `main` that returns nothing resolves to `null`.
 
-## Stdout process execution
+A guest error rejects `execute` with the guest's own name, message, and stack.
 
-`ProcExecutor` calls sync or async `main()` with no arguments. `main()` must resolve to exactly `undefined`; any returned value fails. Success is the exact captured stdout string.
+## Output
+
+The executor keeps no output. stdout and stderr go to optional sinks as UTF-8 text, as the guest writes them:
 
 ```ts
-import { ProcExecutor } from "ts-executor";
-
-const executor = new ProcExecutor({ resolutionRoot: process.cwd() });
-const stdout = await executor.execute({
+await executor.execute({
   cwd: process.cwd(),
-  source: `
-    export async function main(): Promise<void> {
-      await Promise.resolve();
-      process.stdout.write("exact output\\n");
-    }
-  `,
+  source,
+  onStdout: (text) => process.stdout.write(text),
+  onStderr: (text) => process.stderr.write(text),
 });
-
-process.stdout.write(stdout);
 ```
 
-The subprocess's stderr is captured for failure reporting. **On successful `ProcExecutor` execution, stderr is intentionally not returned, discarded, and never merged into stdout.** Runtime failures throw exported `ProcExecutionError`, which carries `stdout`, `stderr`, `truncated`, `exitCode`, and `signal`; reported guest errors retain useful name, message, and stack information. `executeDetailed` returns `{ stdout, truncated, durationMs }` when the caller wants capped stdout rather than a rejection.
+- A multibyte character split across writes is delivered whole; an incomplete sequence at the end of the stream arrives as U+FFFD.
+- A stream without a sink is not piped at all (`stdio: "ignore"`).
+- A sink that throws aborts the execution (the process group is terminated), and `execute` rejects with that error.
+- ANSI colors are passed through; inherited `FORCE_COLOR` can affect console inspection. Use explicit string writes for machine-readable output.
 
-## Host-owned functions with reusable types
-
-Expose existing host closures and sessions as a typed package—no server or connection setup:
+A stdout-style program is a function that prints and returns nothing; the caller collects the text:
 
 ```ts
-import { Type, hostFunction, hostModule, TSFuncExecutor } from "ts-executor";
+let stdout = "";
+await executor.execute({
+  cwd: process.cwd(),
+  source: `export function main(): void { process.stdout.write("exact output\\n"); }`,
+  onStdout: (text) => { stdout += text; },
+});
+```
+
+Bound what a sink keeps yourself; the [harness adapter example](examples/harness-adapter.mjs) keeps at most a fixed number of bytes per stream and flags the rest as dropped.
+
+## Host-owned functions
+
+`hostModule` exposes host closures and sessions as an importable package. The caller supplies the declarations text, the exported function names, and one `call` function:
+
+```ts
+import { hostModule, TSFuncExecutor } from "@sleepymug/ts-executor";
 
 const resolutionRoot = process.cwd();
 let total = 0; // lives in the host, not the fresh subprocess
@@ -62,13 +71,14 @@ const counter = await hostModule({
   resolutionRoot,
   specifier: "@host/counter",
   description: "Update the current session's counter.",
-  functions: {
-    increment: hostFunction({
-      description: "Add an amount and return the new total.",
-      input: Type.Object({ amount: Type.Number() }, { additionalProperties: false }),
-      output: Type.Number(),
-      handler: ({ amount }) => (total += amount),
-    }),
+  declarations: `/** Add an amount and return the new total. */
+export declare function increment(amount: number): Promise<number>;
+`,
+  functions: ["increment"],
+  call(fn, args) {
+    const [amount] = args;
+    if (fn !== "increment" || typeof amount !== "number") throw new TypeError("increment(amount: number)");
+    return (total += amount);
   },
 });
 
@@ -78,7 +88,7 @@ try {
   const source = `
     import { increment } from "@host/counter";
     export async function main() {
-      return await increment({ amount: 2 });
+      return await increment(2);
     }
   `;
   console.log((await executor.execute({ source, cwd: resolutionRoot })).value); // 2
@@ -88,9 +98,14 @@ try {
 }
 ```
 
-`Type` is the TypeBox schema builder. Schemas infer host handler types, validate JSON arguments/results without coercion, and generate agent-readable declarations and JSDoc. Guest functions always return promises, including when their host handler is synchronous. They work with both executors; host-call validation still runs with `check: false`.
+- `declarations` is written verbatim as the package's `index.d.ts`. Guests are type-checked against it; keeping it accurate is the caller's job.
+- `functions` lists distinct, non-reserved identifier names (not `then`). Each generated function forwards its arguments as a JSON array and always returns a promise.
+- Trailing `undefined` arguments are dropped, so omitting an optional argument and passing `undefined` are the same call. Any other `undefined` or non-JSON argument rejects the call inside the guest.
+- `call(fn, args, { signal })` runs in the host. There is no schema validation: validate `args` in `call`. Its result must be strict JSON or the guest's call rejects; a thrown error reaches the guest as a catchable rejection with its name, message, and stack.
+- Unknown names and non-array inputs are rejected before `call`, since a guest can reach the IPC channel directly.
+- The `signal` is aborted when the calling execution ends, and at once when the caller aborts the execution (before its guest is terminated; no further call is dispatched). Host work that ignores it may continue.
 
-The package's `index.d.ts`, `index.js`, and manifest are generated **once per `hostModule` handle**. Reuse that handle across checks, executions, or multiple executors; its `packageRoot` remains available for `listModules` inspection. A new factory call creates a new package, not a persistent cross-restart cache entry.
+The package's `index.d.ts`, `index.js`, and manifest are generated **once per `hostModule` handle**. Reuse the handle across checks, executions, or multiple executors; its `packageRoot` remains available for `listModules` inspection. A new factory call creates a new package, not a persistent cross-restart cache entry.
 
 ```text
 <resolutionRoot>/.ts-executor/
@@ -98,15 +113,13 @@ The package's `index.d.ts`, `index.js`, and manifest are generated **once per `h
   runs/run-<id>/            # main.ts, config, per-run node_modules links and I/O
 ```
 
-Runs are removed after completion or failure; shared scaffolding remains. `dispose()` stops new operations using the module, waits already-started operations, and deletes only its generated package. Do not edit generated artifacts or dispose the handle while you still intend to use its registered executors. Existing `packageModule` files remain caller-owned, and custom materializers still run separately per operation.
+Runs are removed after completion or failure; shared scaffolding remains. `dispose()` stops new operations using the module, waits for already-started operations, and deletes only its generated package. Do not edit generated artifacts or dispose the handle while registered executors still need it. Existing `packageModule` files remain caller-owned, and custom materializers still run separately per operation.
 
-Calls may run concurrently against shared host state. Await all desired calls before `main` returns. The optional second handler argument provides `{ signal }`, aborted on execution-channel closure; already-started host work may continue if it ignores the signal. Failures do not roll back effects, and calls are never automatically retried. No host closures or live objects are copied into the child.
-
-Use `Type.Null()` and explicit `null` for no-data arguments/results. The initial schema subset supports ordinary JSON objects, arrays, fixed tuples, unions/intersections, records, literals, and primitives. Refs/recursion, transforms, formats, non-JSON kinds, `uniqueItems: true`, and some generator-specific edge cases are rejected; see the [schema contract](docs/components/host-functions/index.md#supported-schema-subset). See [the runnable host-module example](examples/06-host-module.mjs).
+Calls may run concurrently against shared host state. Await all desired calls before `main` returns. Failures do not roll back effects, and calls are never retried. No host closures or live objects are copied into the child. See [the runnable host-module example](examples/05-host-module.mjs).
 
 ## Agent instructions
 
-Expose only `listModules` and `execute` as model tools. The harness uses the synchronous `getInstructions(): string` API to obtain deterministic Markdown for the agent prompt. It describes how to discover package interfaces and execute TypeScript with the selected executor's input/output contract.
+Expose only `listModules` and `execute` as model tools. `getInstructions(): string` returns fixed Markdown for the agent prompt describing how to discover package interfaces and execute TypeScript. It states no limits: the harness states the limits it enforces.
 
 ```js
 // Copy the example adapter into your harness and adjust its executor import.
@@ -119,25 +132,41 @@ const response = await callTool("listModules", '{"query":"geometry"}');
 // Deliver response.content to the model, preserving response.isError.
 ```
 
-The [adapter example](examples/harness-adapter.mjs) defines JSON input schemas and validates arguments before dispatch. Model calls accept an absolute path string for `cwd`; they cannot pass `check` or invoke harness helpers. The adapter fixes checking on, applies the harness limits to every call and states them in the instructions, forwards the harness's per-call `signal` through `callTool(name, args, { signal })`, preserves omitted versus explicit-null TSFunc input, forwards type diagnostics, captured stdout/stderr, truncation flags, and abort reasons on failure, and returns stdout text (with a truncation marker when capped) for successful Proc calls. Map its `name`, `description`, `inputSchema`, and `{ isError, content }` fields to your harness's protocol. Its flat schema validator covers the schemas shown; if you extend those schemas, use a matching JSON Schema validator.
+The [adapter example](examples/harness-adapter.mjs) shows the caller owning its limits:
 
-Run [the harness example](examples/05-agent-harness.mjs) to see discovery, filesystem inspection, a diagnostic response, and corrected execution without a model-service dependency.
+- A deadline: each `execute` call runs under `AbortSignal.any([callSignal, AbortSignal.timeout(timeoutMs)])`, with the harness's per-call `signal` passed as `callTool(name, args, { signal })`.
+- Bounded output: `onStdout`/`onStderr` feed buffers that keep at most `maxOutputBytes` UTF-8 bytes per stream.
+- Stated limits: `instructions` appends a `## Limits` section to `getInstructions()`, and the `execute` tool description repeats it.
 
-`listModules({ query? })` returns `{ specifier, packageRoot, description? }` entries in registration order, optionally filtering specifiers and descriptions case-insensitively. Each `packageRoot` is an absolute directory path that remains available between calls. Agents can use the harness's filesystem access to read `package.json`, follow `types` and `exports`, and explore declaration files themselves. Listing returns metadata without reading declaration contents or creating a temporary workspace.
+It also defines JSON input schemas and validates arguments before dispatch, fixes checking on, preserves omitted versus explicit-null input, and returns `{ value, stdout, stderr, truncated, durationMs }` or error details (diagnostics, captured output, and `reason: "timeout" | "signal"` for aborts). Map its `name`, `description`, `inputSchema`, and `{ isError, content }` fields to your harness's protocol. Run [the harness example](examples/04-agent-harness.mjs) to see discovery, filesystem inspection, a diagnostic response, and corrected execution without a model-service dependency.
 
-`getTypes` and `DeclarationTree` have been removed. `packageModule` supplies the discovery root automatically; custom `Module` implementations must now provide a stable absolute `packageRoot` containing their interface files.
+`listModules({ query? })` returns `{ specifier, packageRoot, description? }` entries in registration order, optionally filtering specifiers and descriptions case-insensitively. Each `packageRoot` is an absolute directory that remains available between calls. Agents use the harness's filesystem access to read `package.json`, follow `types` and `exports`, and explore declaration files. Listing reads no declarations and creates no workspace.
 
 ## Shared behavior
 
-Both executors expose `listModules` and `execute` for the model, plus `getInstructions`, `modules`, and `check` for harness code. `execute` checks by default; harness code can pass `check: false` to skip it. Each execution gets a newly spawned Node process, heap, module cache, and package state.
+The executor exposes `listModules` and `execute` for the model, plus `getInstructions`, `modules`, and `check` for harness code. `execute` checks by default; harness code can pass `check: false` to skip it. Each execution gets a newly spawned Node process, heap, module cache, and package state.
 
-`resolutionRoot` is the package-resolution base; temporary operation workspaces live below its `.ts-executor/runs/` directory. Required `execute.cwd` is an absolute path string or a query- and fragment-free local `file:` URL naming an existing directory. It controls `process.cwd()` and relative filesystem access, but package resolution remains anchored to the generated entrypoint below `resolutionRoot`.
+`resolutionRoot` is the package-resolution base; temporary operation workspaces live below its `.ts-executor/runs/` directory. Required `execute.cwd` is an absolute path string or a query- and fragment-free local `file:` URL naming an existing directory. It controls `process.cwd()` and relative filesystem access; package resolution stays anchored to the generated entrypoint below `resolutionRoot`.
 
-## Cancellation and output limits
+General network clients—including generated Connect/Protobuf clients—are ordinary packages. Register built JavaScript and declarations with `packageModule`, then construct the connection inside submitted code.
 
-Both `execute` methods accept `signal` (an `AbortSignal`), `timeoutMs` (a wall-clock deadline measured from the call, covering type-checking), `maxOutputBytes` (bytes retained per stream; default `DEFAULT_MAX_OUTPUT_BYTES`, 4 MiB), `killGraceMs` (default `DEFAULT_KILL_GRACE_MS`, 2 s), `killGroupOnExit` (default false), and `env`. Aborting or exceeding the deadline sends SIGTERM to the guest's whole process group, SIGKILL after the grace period, waits for the direct child, cleans the run workspace, and rejects with `ExecutionAbortedError`, which carries `reason` (`"signal"` or `"timeout"`), the output captured so far, `truncated`, `exitCode`, `signal`, and `durationMs`. A pre-aborted signal rejects before anything is spawned. Effects the program already had are not rolled back.
+## Cancellation, deadlines, and reaping
 
-`killGroupOnExit: true` additionally SIGKILLs whatever remains in the guest's process group after a NORMAL exit, once its output is captured, so a program that starts a background process does not leak it. It defaults to false, which keeps such descendants running after the execution resolves. A descendant that moved to its own session is out of reach either way.
+`execute` accepts `ExecutionControl`: `signal`, `env`, `onStdout`, and `onStderr`. There is no built-in deadline, output cap, or other resource limit.
+
+```ts
+const result = await executor.execute({
+  cwd: process.cwd(),
+  source,
+  signal: AbortSignal.any([callerSignal, AbortSignal.timeout(30_000)]),
+});
+```
+
+- Aborting `signal` first closes the guest's host-call channel (running host calls see their signal abort, and nothing more is dispatched), then sends SIGTERM to the guest's whole process group, SIGKILL after a fixed 2 s grace, waits for the direct child, cleans the run workspace, and rejects with `ExecutionAbortedError` carrying `durationMs`.
+- A pre-aborted signal rejects before anything is prepared or spawned. Checking is synchronous and cannot be interrupted, so the signal is checked again immediately before spawning; an abort during preparation or checking starts no guest.
+- Only an abort before the guest exits counts: one that arrives after it exited leaves its result intact.
+- After every exit, whatever remains in the guest's process group is SIGKILLed, so background processes a program starts do not outlive it. A descendant that moved to its own session or group is out of reach.
+- Effects the program already had are not rolled back.
 
 `env` supplies extra variables for one guest, merged over the inherited environment:
 
@@ -145,23 +174,11 @@ Both `execute` methods accept `signal` (an `AbortSignal`), `timeoutMs` (a wall-c
 await executor.execute({ source, cwd, env: { RUN_ID: "call-7" } });
 ```
 
-The host's own `process.env` is never modified, so concurrent executions cannot observe each other's values and nothing leaks into a later run. A name may shadow an inherited variable but not one of `RESERVED_ENVIRONMENT_NAMES` — the executor's `TSX_TSCONFIG_PATH` and its private restore variable, which the bootstrap needs to rebuild the caller's original `tsx` configuration; naming either throws rather than being ignored. Names must be non-empty and free of `=` and NUL, values strings without NUL. This adds variables; it does not remove or filter inherited ones, so it is not a sandbox (see [Decision 0007](docs/decisions/0007-per-execution-environment.md)).
+The host's own `process.env` is never modified, so concurrent executions cannot observe each other's values and nothing leaks into a later run. A name may shadow an inherited variable but not one of `RESERVED_ENVIRONMENT_NAMES` — the executor's `TSX_TSCONFIG_PATH` and its private restore variable, which the bootstrap needs to rebuild the caller's original `tsx` configuration; naming either throws. Names must be non-empty and free of `=` and NUL, values strings without NUL. This adds variables; it does not remove or filter inherited ones, so it is not a sandbox (see [Decision 0007](docs/decisions/0007-per-execution-environment.md)).
 
-```ts
-const controller = new AbortController();
-const result = await executor.execute({
-  cwd: process.cwd(),
-  source,
-  signal: controller.signal,
-  timeoutMs: 30_000,
-  maxOutputBytes: 64 * 1024,
-});
-console.log(result.truncated); // { stdout: false, stderr: false }
-```
+## Trust model
 
-Output beyond `maxOutputBytes` is read and discarded so the program never blocks; the retained prefix is returned with `truncated: { stdout, stderr }` on `TSFuncExecuteResult`, on TSFunc runtime errors, on `ProcExecutionError`, and on `ExecutionAbortedError`. `ProcExecutor.execute` still returns exact stdout and therefore rejects with `ProcExecutionError` when stdout was truncated; `ProcExecutor.executeDetailed` returns `{ stdout, truncated, durationMs }` instead. Pass the same limits to `getInstructions({ timeoutMs, maxOutputBytes })` so the model reads the limits the harness enforces.
-
-General network clients—including generated Connect/Protobuf clients—are ordinary packages. Register built JavaScript and declarations with `packageModule`, then construct the connection inside submitted code.
+The caller and its host-module `call` functions are trusted. The program is untrusted for correctness: its input, result, errors, and host-call arguments are validated as strict JSON, and its failures are reported, never believed. It is not contained, though, and the executor has no mechanisms whose only purpose is to survive a hostile program. It may use as much CPU, memory, time, output, result size, and host-call traffic as it likes. A type that is expensive to check blocks the caller's event loop while it is checked, in the caller's process. A large result is read whole. A program that writes raw bytes to its IPC descriptor can crash the caller. Resource limits belong to the caller (abort the signal, bound what the sinks keep) and to the environment the executor runs in (container limits, monitoring).
 
 ## Examples
 
@@ -169,6 +186,6 @@ General network clients—including generated Connect/Protobuf clients—are ord
 pnpm run examples
 ```
 
-See [`examples/`](examples/README.md) for both execution flavors, physical packages, and a package-native network client.
+See [`examples/`](examples/README.md) for JSON and stdout-style programs, physical packages, a package-native network client, the harness adapter, and a host module.
 
-Execution is not sandboxed. Subprocesses retain normal Node filesystem, network, built-in-module, environment, and child-process authority. The executor waits only for its direct child; it terminates the child's process group on abort or timeout, and after a normal exit only when `killGroupOnExit` is set, and provides no environment *filtering* (`env` only adds variables), custom loader, or process pool. See [`docs/`](docs/index.md) for complete contracts.
+Execution is not sandboxed. Subprocesses retain normal Node filesystem, network, built-in-module, environment, and child-process authority. The executor waits only for its direct child, terminates its process group on abort and reaps what remains of it after exit (POSIX; on Windows only the direct child), and provides no environment *filtering*, custom loader, or process pool. See [`docs/`](docs/index.md) for complete contracts and [Decision 0008](docs/decisions/0008-one-executor-callers-own-limits-host-modules-carry-declarations.md) for the 0.4.0 changes.

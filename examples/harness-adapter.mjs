@@ -1,26 +1,28 @@
 import { isAbsolute } from "node:path";
-import {
-  DEFAULT_MAX_OUTPUT_BYTES,
-  ExecutionAbortedError,
-  ProcExecutionError,
-  ProcExecutor,
-  TSFuncExecutor,
-  TypeCheckError,
-} from "../dist/index.js";
+import { ExecutionAbortedError, TSFuncExecutor, TypeCheckError } from "../dist/index.js";
 
-// Example harness code, not an additional executor API. Map these tool definitions
-// and { isError, content } responses to your harness's tool protocol. `limits` are
-// harness policy applied to every execution and stated in the instructions; the
-// model cannot change them. Pass the harness's per-call AbortSignal to `callTool`.
-export function createHarnessAdapter(executor, limits = {}) {
-  const acceptsInput = executor instanceof TSFuncExecutor;
-  if (!acceptsInput && !(executor instanceof ProcExecutor)) {
-    throw new TypeError("Expected a TSFuncExecutor or ProcExecutor");
+// Example harness code, not an executor API. Map these tool definitions and
+// { isError, content } responses to your harness's tool protocol.
+//
+// The limits are the harness's own policy, not the executor's: the adapter applies
+// them to every execution and states them to the model. The executor only runs the
+// program; it stops when the signal aborts and hands over output as it is written.
+export const DEFAULT_LIMITS = Object.freeze({
+  timeoutMs: 60_000,
+  maxOutputBytes: 64 * 1024,
+});
+
+export function createHarnessAdapter(executor, options = {}) {
+  if (!(executor instanceof TSFuncExecutor)) throw new TypeError("Expected a TSFuncExecutor");
+  const limits = Object.freeze({ ...DEFAULT_LIMITS, ...options });
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive integer`);
   }
-  const control = {
-    ...(limits.timeoutMs === undefined ? {} : { timeoutMs: limits.timeoutMs }),
-    maxOutputBytes: limits.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
-  };
+  const limitsText = [
+    `Each execution must finish within ${duration(limits.timeoutMs)} of wall-clock time, including type-checking; after that the program and every process it started are killed and the call fails.`,
+    `At most ${size(limits.maxOutputBytes)} of stdout and of stderr are kept per call; the rest is dropped and the result marks that stream as truncated. Put the answer in the return value, not in the output.`,
+  ].join(" ");
+
   const tools = [
     {
       name: "listModules",
@@ -34,15 +36,13 @@ export function createHarnessAdapter(executor, limits = {}) {
     },
     {
       name: "execute",
-      description: acceptsInput
-        ? "Check and run TypeScript exporting main(input). Returns JSON containing value, stdout, stderr, and durationMs."
-        : "Check and run TypeScript exporting main() that returns no value. Returns exact stdout text.",
+      description: `Check and run TypeScript exporting main(input). Returns JSON containing value, stdout, stderr, truncated, and durationMs. ${limitsText}`,
       inputSchema: {
         type: "object",
         properties: {
           source: { type: "string", description: "Complete TypeScript ESM program exporting main." },
           cwd: { type: "string", description: "Absolute filesystem path to an existing working directory." },
-          ...(acceptsInput ? { input: { description: "Optional JSON input passed to main; omission passes undefined." } } : {}),
+          input: { description: "Optional JSON input passed to main; omission passes undefined." },
         },
         required: ["source", "cwd"],
         additionalProperties: false,
@@ -50,9 +50,45 @@ export function createHarnessAdapter(executor, limits = {}) {
     },
   ];
 
+  async function execute(args, callSignal) {
+    if (!isAbsolute(args.cwd)) throw new TypeError("cwd must be an absolute filesystem path");
+    // The deadline is the harness's: one timeout signal, combined with the call's own.
+    const deadline = AbortSignal.timeout(limits.timeoutMs);
+    const signal = callSignal === undefined ? deadline : AbortSignal.any([callSignal, deadline]);
+    const stdout = boundedText(limits.maxOutputBytes);
+    const stderr = boundedText(limits.maxOutputBytes);
+    const output = () => ({
+      stdout: stdout.text(),
+      stderr: stderr.text(),
+      truncated: { stdout: stdout.truncated, stderr: stderr.truncated },
+    });
+    try {
+      const result = await executor.execute({
+        source: args.source,
+        cwd: args.cwd,
+        ...(Object.hasOwn(args, "input") ? { input: args.input } : {}),
+        check: true, // Harness policy; the model cannot supply this option.
+        signal,
+        onStdout: stdout.push,
+        onStderr: stderr.push,
+      });
+      return { value: result.value, ...output(), durationMs: Math.round(result.durationMs) };
+    } catch (error) {
+      const details = errorDetails(error);
+      Object.assign(details, output());
+      if (error instanceof ExecutionAbortedError) {
+        details.reason = deadline.aborted ? "timeout" : "signal";
+        details.durationMs = Math.round(error.durationMs);
+      }
+      throw Object.assign(new Error(details.message), { details });
+    }
+  }
+
   return {
-    instructions: executor.getInstructions(control),
+    instructions: `${executor.getInstructions()}\n\n## Limits\n\n${limitsText}`,
+    limits,
     tools,
+    // Pass the harness's per-call AbortSignal as options.signal.
     async callTool(name, argumentsJson, options = {}) {
       try {
         const tool = tools.find((candidate) => candidate.name === name);
@@ -60,39 +96,51 @@ export function createHarnessAdapter(executor, limits = {}) {
         if (typeof argumentsJson !== "string") throw new TypeError("Tool arguments must be JSON text");
         const args = JSON.parse(argumentsJson);
         validateArguments(args, tool.inputSchema);
-        let result;
-        if (name === "listModules") {
-          result = await executor.listModules(args);
-        } else {
-          if (!isAbsolute(args.cwd)) throw new TypeError("cwd must be an absolute filesystem path");
-          const request = {
-            source: args.source,
-            cwd: args.cwd,
-            ...(Object.hasOwn(args, "input") ? { input: args.input } : {}),
-            check: true, // Harness policy; the model cannot supply this option.
-            ...control,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          };
-          if (acceptsInput) {
-            result = JSON.stringify(await executor.execute(request));
-          } else {
-            const detailed = await executor.executeDetailed(request);
-            result = detailed.truncated.stdout
-              ? `${detailed.stdout}\n[stdout truncated at ${control.maxOutputBytes} bytes]`
-              : detailed.stdout;
-          }
-        }
-        return { isError: false, content: typeof result === "string" ? result : JSON.stringify(result) };
+        const result = name === "listModules"
+          ? await executor.listModules(args)
+          : await execute(args, options.signal);
+        return { isError: false, content: JSON.stringify(result) };
       } catch (error) {
-        return { isError: true, content: JSON.stringify(errorDetails(error)) };
+        return { isError: true, content: JSON.stringify(error?.details ?? errorDetails(error)) };
       }
     },
   };
 }
 
+// Keeps at most maxBytes UTF-8 bytes of whole characters; later text is dropped.
+function boundedText(maxBytes) {
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  return {
+    push(text) {
+      if (truncated) return;
+      const length = Buffer.byteLength(text);
+      if (bytes + length <= maxBytes) {
+        chunks.push(text);
+        bytes += length;
+        return;
+      }
+      let kept = "";
+      for (const character of text) {
+        const width = Buffer.byteLength(character);
+        if (bytes + width > maxBytes) break;
+        kept += character;
+        bytes += width;
+      }
+      chunks.push(kept);
+      truncated = true;
+    },
+    text: () => chunks.join(""),
+    get truncated() {
+      return truncated;
+    },
+  };
+}
+
 // These flat schemas require objects with string fields, plus unrestricted JSON
-// for TSFunc input. JSON.parse supplies JSON values; the executor enforces its
-// stricter JSON input contract (including finite numbers).
+// for input. JSON.parse supplies JSON values; the executor enforces its stricter
+// JSON input contract (including finite numbers).
 function validateArguments(args, schema) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
     throw new TypeError("Tool arguments must be a JSON object");
@@ -114,17 +162,18 @@ function errorDetails(error) {
     message: error instanceof Error ? error.message : "Executor failed with a non-Error value",
   };
   if (error instanceof TypeCheckError) details.diagnostics = error.diagnostics;
-  for (const stream of ["stdout", "stderr"]) {
-    if (typeof error?.[stream] === "string") details[stream] = error[stream];
-  }
-  if (error?.truncated !== undefined) details.truncated = error.truncated;
-  if (error instanceof ExecutionAbortedError) {
-    details.reason = error.reason;
-    details.durationMs = Math.round(error.durationMs);
-  }
-  if (error instanceof ProcExecutionError || error instanceof ExecutionAbortedError) {
-    details.exitCode = error.exitCode;
-    details.signal = error.signal;
-  }
   return details;
+}
+
+function duration(milliseconds) {
+  const count = (value, unit) => `${value} ${unit}${value === 1 ? "" : "s"}`;
+  if (milliseconds % 60_000 === 0) return count(milliseconds / 60_000, "minute");
+  if (milliseconds % 1000 === 0) return count(milliseconds / 1000, "second");
+  return `${milliseconds} ms`;
+}
+
+function size(bytes) {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes} bytes`;
 }

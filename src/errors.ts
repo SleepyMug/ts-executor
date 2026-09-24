@@ -1,4 +1,4 @@
-import type { AbortReason, Diagnostic, OutputTruncation } from "./types.js";
+import type { Diagnostic } from "./types.js";
 
 export class TypeCheckError extends Error {
   readonly diagnostics: readonly Diagnostic[];
@@ -20,61 +20,30 @@ export class TypeCheckError extends Error {
   }
 }
 
-/** Captured termination details shared by the post-start error classes. */
-export interface CapturedTermination {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
-  readonly exitCode: number | null;
-  readonly signal: NodeJS.Signals | null;
-}
+/**
+ * The caller's signal aborted, so the guest process group was terminated (or never
+ * started). Effects the guest already had are not rolled back.
+ */
+export class ExecutionAbortedError extends Error {
+  readonly durationMs: number;
 
-/** A failure reported after ProcExecutor starts its fresh subprocess. */
-export class ProcExecutionError extends Error {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
-  readonly exitCode: number | null;
-  readonly signal: NodeJS.Signals | null;
-
-  constructor(message: string, details: CapturedTermination, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "ProcExecutionError";
-    this.stdout = details.stdout;
-    this.stderr = details.stderr;
-    this.truncated = details.truncated;
-    this.exitCode = details.exitCode;
-    this.signal = details.signal;
+  constructor(durationMs: number) {
+    super("Execution was aborted by the caller's signal and terminated");
+    this.name = "ExecutionAbortedError";
+    this.durationMs = durationMs;
   }
 }
 
-/**
- * The host terminated the guest process group because the caller's signal aborted
- * or the deadline passed. Thrown by both flavors; carries whatever output was
- * captured before termination. Effects the guest already had are not rolled back.
- */
-export class ExecutionAbortedError extends Error {
-  readonly reason: AbortReason;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
-  readonly exitCode: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly durationMs: number;
-
-  constructor(reason: AbortReason, details: CapturedTermination & { readonly durationMs: number }) {
-    super(
-      reason === "timeout"
-        ? `Execution exceeded its deadline after ${Math.round(details.durationMs)} ms and was terminated`
-        : "Execution was aborted by the caller's signal and terminated",
-    );
-    this.name = "ExecutionAbortedError";
-    this.reason = reason;
-    this.stdout = details.stdout;
-    this.stderr = details.stderr;
-    this.truncated = details.truncated;
-    this.exitCode = details.exitCode;
-    this.signal = details.signal;
-    this.durationMs = details.durationMs;
+/** Keeps the primary failure and records a secondary cleanup failure on it, when it can. */
+export function attachCleanupError(primary: unknown, cleanup: unknown): void {
+  if ((typeof primary !== "object" && typeof primary !== "function") || primary === null) return;
+  try {
+    Object.defineProperty(primary, "cleanupError", {
+      value: cleanup,
+      enumerable: true,
+      configurable: true,
+    });
+  } catch {
+    // Preserve the primary failure even when it cannot accept metadata.
   }
 }

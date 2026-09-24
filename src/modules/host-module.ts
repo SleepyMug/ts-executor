@@ -1,18 +1,45 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { attachCleanupError } from "../errors.js";
 import { bindHostModule, type HostBinding } from "../host-bindings.js";
-import { captureHostFunction, type CapturedHostFunction, type HostFunction } from "../host-function.js";
 import { assertPackageSpecifier } from "../registry.js";
 import { resolveResolutionRoot, storageDirectory } from "../storage.js";
-import type { Module } from "../types.js";
+import type { JsonValue, Module } from "../types.js";
+
+export interface HostCallContext {
+  /**
+   * Aborted when the calling execution ends (it settled or its channel closed), and at once
+   * when the caller aborts it, before its guest is terminated.
+   */
+  readonly signal: AbortSignal;
+}
+
+/** Runs in the executor's process for every call a guest makes to a host module function. */
+export type HostCall = (
+  fn: string,
+  args: readonly JsonValue[],
+  context: HostCallContext,
+) => JsonValue | Promise<JsonValue>;
 
 export interface HostModuleOptions {
   /** Storage base for generated packages; normally the executor's resolutionRoot. */
   readonly resolutionRoot: string | URL;
   readonly specifier: string;
   readonly description?: string;
-  readonly functions: Readonly<Record<string, HostFunction>>;
+  /**
+   * The package's `index.d.ts`, written as given: what guests are type-checked
+   * against. It should declare each function in `functions` and nothing else that
+   * is runtime-visible; its accuracy is the caller's responsibility.
+   */
+  readonly declarations: string;
+  /** Exported function names. Each forwards its arguments, as a JSON array, to `call`. */
+  readonly functions: readonly string[];
+  /**
+   * Handles every call. Its result, or its error's name and message, is returned to
+   * the guest; a result that is not strict JSON rejects the guest's call instead.
+   */
+  readonly call: HostCall;
 }
 
 export interface HostModule extends Module {
@@ -21,39 +48,72 @@ export interface HostModule extends Module {
 }
 
 const clientUrl = new URL("../runtime/host-client.js", import.meta.url).href;
+const identifier = /^[A-Za-z_$][A-Za-z0-9_$]*$/u;
+// Strict-mode and module reserved bindings, not just parser keywords.
+const reservedNames = new Set([
+  "arguments", "await", "break", "case", "catch", "class", "const", "continue",
+  "debugger", "default", "delete", "do", "else", "enum", "eval", "export", "extends",
+  "false", "finally", "for", "function", "if", "implements", "import", "in",
+  "instanceof", "interface", "let", "new", "null", "package", "private", "protected",
+  "public", "return", "static", "super", "switch", "this", "throw", "true", "try",
+  "typeof", "var", "void", "while", "with", "yield",
+]);
+
+function functionNames(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) throw new TypeError("Host module functions must be an array of names");
+  const names = [...value];
+  for (const name of names) {
+    if (typeof name !== "string" || !identifier.test(name) || reservedNames.has(name)) {
+      throw new TypeError(`Host function name ${JSON.stringify(name)} must be a non-reserved identifier`);
+    }
+    // An exported then makes dynamic import treat the module namespace as a thenable.
+    if (name === "then") throw new TypeError('Host function name "then" is reserved for ESM interoperability');
+  }
+  if (new Set(names).size !== names.length) throw new TypeError("Host function names must be distinct");
+  return Object.freeze(names);
+}
+
+/**
+ * The generated JavaScript: every function forwards its arguments. Trailing
+ * `undefined` arguments are dropped, so omitting an optional argument and passing
+ * `undefined` for it are the same call; any other `undefined` is not JSON and
+ * rejects the call in the guest.
+ */
+function moduleSource(id: string, names: readonly string[]): string {
+  const forwarders = names.map((name, index) =>
+    `function fn${index}(...args) { return forward(${JSON.stringify(name)}, args); }\nexport { fn${index} as ${name} };`,
+  );
+  return [
+    `import { callHost } from ${JSON.stringify(clientUrl)};`,
+    `function forward(name, args) {`,
+    `  let length = args.length;`,
+    `  while (length > 0 && args[length - 1] === undefined) length -= 1;`,
+    `  args.length = length;`,
+    `  return callHost(${JSON.stringify(id)}, name, args);`,
+    `}`,
+    ...forwarders,
+    "",
+  ].join("\n");
+}
 
 /** Generate once. Reuse this handle across checks, executions, and executors. */
 export async function hostModule(options: HostModuleOptions): Promise<HostModule> {
-  const { specifier, description, functions } = options;
-  const resolutionRoot = resolveResolutionRoot(options.resolutionRoot);
+  const { specifier, description, declarations, call } = options;
+  const resolutionRoot = resolveResolutionRoot(options.resolutionRoot, "hostModule");
   assertPackageSpecifier(specifier);
   if (description !== undefined && typeof description !== "string") {
     throw new TypeError("Host module description must be a string");
   }
-  if (typeof functions !== "object" || functions === null || Array.isArray(functions)) {
-    throw new TypeError("Host module functions must be an object of hostFunction handles");
-  }
-  const captured = new Map<string, CapturedHostFunction>();
-  for (const name of Reflect.ownKeys(functions)) {
-    if (typeof name !== "string") throw new TypeError("Host function names must be strings");
-    // An exported then makes dynamic import treat the module namespace as a thenable.
-    if (name === "then") throw new TypeError('Host function name "then" is reserved for ESM interoperability');
-    const descriptor = Object.getOwnPropertyDescriptor(functions, name);
-    if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
-      throw new TypeError("Host module functions must be enumerable data properties");
-    }
-    captured.set(name, captureHostFunction(descriptor.value as HostFunction));
-  }
-  // All metadata, schemas and functions are captured before the first await.
-  const declarations = await Promise.all([...captured].map(([name, fn]) => fn.declaration(name)));
+  if (typeof declarations !== "string") throw new TypeError("Host module declarations must be a string");
+  if (typeof call !== "function") throw new TypeError("Host module call must be a function");
+  // Everything is captured before the first await.
+  const names = functionNames(options.functions);
+  const known = new Set(names);
   const id = randomUUID();
   const directory = await storageDirectory(resolutionRoot, "modules");
   const packageRoot = await mkdtemp(join(directory, "module-"));
   try {
     await chmod(packageRoot, 0o700);
-    const proxies = [...captured.keys()].map((name, index) =>
-      `function fn${index}(input) { return call(${JSON.stringify(id)}, ${JSON.stringify(name)}, input); }\nexport { fn${index} as ${name} };`,
-    );
     // Sequential writes prevent a failed write racing directory cleanup.
     await writeFile(join(packageRoot, "package.json"), `${JSON.stringify({
       name: specifier,
@@ -62,19 +122,13 @@ export async function hostModule(options: HostModuleOptions): Promise<HostModule
       types: "./index.d.ts",
       exports: { ".": { types: "./index.d.ts", import: "./index.js" } },
     }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await writeFile(join(packageRoot, "index.d.ts"), `${declarations.join("\n")}\nexport {};\n`, { encoding: "utf8", mode: 0o600 });
-    await writeFile(join(packageRoot, "index.js"), `import { callHost as call } from ${JSON.stringify(clientUrl)};\n${proxies.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+    await writeFile(join(packageRoot, "index.d.ts"), declarations, { encoding: "utf8", mode: 0o600 });
+    await writeFile(join(packageRoot, "index.js"), moduleSource(id, names), { encoding: "utf8", mode: 0o600 });
   } catch (error) {
     try {
       await rm(packageRoot, { recursive: true, force: true });
     } catch (cleanupError) {
-      try {
-        if ((typeof error === "object" || typeof error === "function") && error !== null) {
-          Object.defineProperty(error, "cleanupError", { value: cleanupError, enumerable: true });
-        }
-      } catch {
-        // Preserve the primary failure even when it cannot accept metadata.
-      }
+      attachCleanupError(error, cleanupError);
     }
     throw error;
   }
@@ -119,9 +173,10 @@ export async function hostModule(options: HostModuleOptions): Promise<HostModule
       };
     },
     async invoke(method, input, signal) {
-      const fn = captured.get(method);
-      if (fn === undefined) throw new Error(`Unknown host function ${JSON.stringify(specifier)}.${method}`);
-      return fn.invoke(input, Object.freeze({ signal }));
+      // A guest can reach the client directly, so neither the name nor the shape is trusted.
+      if (!known.has(method)) throw new Error(`Unknown host function ${JSON.stringify(specifier)}.${method}`);
+      if (!Array.isArray(input)) throw new TypeError(`Host function ${method} expects an argument array`);
+      return call(method, input, Object.freeze({ signal }));
     },
   }));
   return module;

@@ -2,6 +2,10 @@
 
 > Distinct JSON-function and stdout-process APIs share internal orchestration and a neutral spawn primitive without a public mode abstraction.
 
+## Status
+
+Superseded by [Decision 0008](0008-one-executor-callers-own-limits-host-modules-carry-declarations.md) (2026-09-24). `ProcExecutor` and the internal `ExecutorCore` are removed; `TSFuncExecutor` is the only executor.
+
 ## Context
 
 Decision 0002 established a plain subprocess, strict JSON files, physical package graph, independent `resolutionRoot` and `cwd`, and deterministic direct-child completion. That contract is appropriate for calls that exchange JSON, but process-style programs often define success entirely as stdout. Returning a composite JSON execution object for those programs exposes irrelevant input/value concepts and makes stdout consumers unpack a mode they did not request.

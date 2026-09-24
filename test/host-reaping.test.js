@@ -4,18 +4,67 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import test from "node:test";
-import { hostModule, hostFunction, Type, TSFuncExecutor } from "../dist/index.js";
-import { project, workspaceNames } from "./helpers.js";
+import { hostModule, TSFuncExecutor } from "../dist/index.js";
+import { alive, collect, gone, project, workspaceNames } from "./helpers.js";
 
 const require = createRequire(import.meta.url);
 const childProcess = require("node:child_process");
+
+// Starts a `sleep` the host test must see die (same process group) or survive (own session).
+function sleeperSource({ detached = false, fail = false } = {}) {
+  return `
+    import { spawn } from "node:child_process";
+    export function main(): number {
+      // Inherits stdout and stderr, so it also holds the output pipes open.
+      const sleeper = spawn("sleep", ["300"], { stdio: ["ignore", 1, 2], detached: ${detached} });
+      sleeper.unref();
+      process.stdout.write(String(sleeper.pid) + "\\n");
+      ${fail ? 'throw new Error("guest failed after starting a process");' : "return sleeper.pid!;"}
+    }
+  `;
+}
+
+test("whatever the guest leaves in its process group is killed after a normal exit", { timeout: 20_000 }, async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
+  const result = await executor.execute({ cwd: root, check: false, source: sleeperSource(), ...output.sinks });
+  t.after(() => { try { process.kill(result.value, "SIGKILL"); } catch { /* already gone */ } });
+  assert.equal(output.stdout(), `${result.value}\n`);
+  assert.equal(await gone(result.value), true, "the leftover child is reaped without being asked");
+  assert.deepEqual(await workspaceNames(root), []);
+});
+
+test("the process group is also killed when the guest fails", { timeout: 20_000 }, async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
+  await assert.rejects(
+    executor.execute({ cwd: root, check: false, source: sleeperSource({ fail: true }), ...output.sinks }),
+    /guest failed after starting a process/u,
+  );
+  const pid = Number(output.stdout());
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } });
+  assert.equal(await gone(pid), true);
+  assert.deepEqual(await workspaceNames(root), []);
+});
+
+test("a descendant that moved to its own session is out of reach", { timeout: 20_000 }, async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const result = await executor.execute({ cwd: root, check: false, source: sleeperSource({ detached: true }) });
+  t.after(() => { try { process.kill(result.value, "SIGKILL"); } catch { /* already gone */ } });
+  assert.equal(alive(result.value), true);
+});
 
 test("post-spawn IPC errors retain the child, workspace, and module lease until exit", { timeout: 20_000 }, async t => {
   const root = await project(t);
   const module = await hostModule({
     resolutionRoot: root,
     specifier: "@host/reaping",
-    functions: { noop: hostFunction({ input: Type.Null(), output: Type.Null(), handler: () => null }) },
+    declarations: "export declare function noop(): Promise<null>;\n",
+    functions: ["noop"],
+    call: () => null,
   });
   const executor = new TSFuncExecutor({ resolutionRoot: root });
   executor.modules.register(module);
@@ -36,9 +85,11 @@ test("post-spawn IPC errors retain the child, workspace, and module lease until 
   };
   syncBuiltinESMExports();
   let settled = false;
+  const output = collect();
   const execution = executor.execute({
     cwd: root,
     check: false,
+    ...output.sinks,
     source: `
       import { access } from "node:fs/promises";
       import { setTimeout as delay } from "node:timers/promises";
@@ -66,7 +117,7 @@ test("post-spawn IPC errors retain the child, workspace, and module lease until 
     await writeFile(join(root, "continue"), "go");
     const result = await execution;
     assert.equal(result.error, injected);
-    assert.equal(result.error.stdout, "child completed before cleanup\n");
+    assert.equal(output.stdout(), "child completed before cleanup\n", "output is delivered until the child exits");
     assert.equal(child.exitCode, 0);
     await disposal;
     assert.deepEqual(await workspaceNames(root), []);

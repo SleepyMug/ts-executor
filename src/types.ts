@@ -61,41 +61,20 @@ export interface ExecutorOptions {
   readonly resolutionRoot: string | URL;
 }
 
-/** Per-stream flags: true when captured bytes beyond `maxOutputBytes` were discarded. */
-export interface OutputTruncation {
-  readonly stdout: boolean;
-  readonly stderr: boolean;
-}
-
-/** Why an execution was terminated by the host rather than by the guest settling. */
-export type AbortReason = "signal" | "timeout";
-
 /**
- * Cancellation and capture limits shared by both execution flavors.
- * Cancellation kills the guest's whole process group; see the executor docs.
+ * How the caller controls one execution. Deadlines and output limits are the caller's:
+ * abort `signal` when time is up, and bound what `onStdout`/`onStderr` keep.
  */
 export interface ExecutionControl {
-  /** Aborting terminates the guest process group and rejects with `ExecutionAbortedError`. */
+  /**
+   * Aborting closes the guest's host-call channel, terminates its whole process group
+   * (SIGTERM, then SIGKILL after a grace period), and rejects with
+   * `ExecutionAbortedError`. Type-checking is synchronous: an abort during it takes
+   * effect before the guest would spawn. An abort after the guest exited does not count.
+   * Combine the caller's own signals, e.g. `AbortSignal.any([signal, AbortSignal.timeout(ms)])`,
+   * for a deadline.
+   */
   readonly signal?: AbortSignal;
-  /**
-   * Wall-clock deadline in milliseconds measured from the `execute` call, covering
-   * checking and execution. Positive integer; omitted means no deadline.
-   */
-  readonly timeoutMs?: number;
-  /**
-   * Bytes retained per stream (stdout and stderr separately). Positive integer;
-   * defaults to `DEFAULT_MAX_OUTPUT_BYTES`. Further bytes are read and discarded.
-   */
-  readonly maxOutputBytes?: number;
-  /** Milliseconds between SIGTERM and SIGKILL on abort/timeout. Defaults to `DEFAULT_KILL_GRACE_MS`. */
-  readonly killGraceMs?: number;
-  /**
-   * After the guest exits normally and its output is captured, SIGKILL whatever is
-   * left in its process group (best effort) so leftover children do not outlive the
-   * execution. Defaults to false: descendants survive a normal exit. A descendant
-   * that moved to its own session (e.g. `detached: true`) is out of reach either way.
-   */
-  readonly killGroupOnExit?: boolean;
   /**
    * Extra environment variables for this one guest, merged over the inherited
    * environment. The host's own `process.env` is never modified, so concurrent
@@ -106,6 +85,14 @@ export interface ExecutionControl {
    * remove or filter inherited ones.
    */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Receives the guest's stdout as it is written, decoded as UTF-8. The executor keeps
+   * none of it; without a sink the stream is discarded. A sink that throws aborts the
+   * execution, which then rejects with that error.
+   */
+  readonly onStdout?: (text: string) => void;
+  /** Like `onStdout`, for stderr. */
+  readonly onStderr?: (text: string) => void;
 }
 
 export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> extends ExecutionControl {
@@ -119,35 +106,7 @@ export interface TSFuncExecuteRequest<Input extends JsonValue = JsonValue> exten
 
 export interface TSFuncExecuteResult<Output extends JsonValue = JsonValue> {
   readonly value: Output;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
   readonly durationMs: number;
-}
-
-export interface ProcExecuteRequest extends ExecutionControl {
-  readonly source: string;
-  /** Absolute directory path or file URL used only as the subprocess working directory. */
-  readonly cwd: string | URL;
-  /** Typecheck before execution. Defaults to true. */
-  readonly check?: boolean;
-}
-
-/** Result of `ProcExecutor.executeDetailed`: stdout plus what `execute` cannot express. */
-export interface ProcExecuteResult {
-  readonly stdout: string;
-  readonly truncated: OutputTruncation;
-  readonly durationMs: number;
-}
-
-/** Effective limits the harness enforces, so `getInstructions` can state them to the model. */
-export interface InstructionsOptions {
-  /** The deadline the harness passes to every `execute`, if any. */
-  readonly timeoutMs?: number;
-  /** The per-stream retention cap the harness passes; defaults to `DEFAULT_MAX_OUTPUT_BYTES`. */
-  readonly maxOutputBytes?: number;
-  /** Whether the harness passes `killGroupOnExit`, so the model knows started processes end with the program. */
-  readonly killGroupOnExit?: boolean;
 }
 
 export interface PackageModuleOptions {

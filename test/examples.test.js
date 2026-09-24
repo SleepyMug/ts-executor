@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
 for (const forceColor of ["0", "1"]) {
-  test(`the TS function and stdout process examples run end to end (FORCE_COLOR=${forceColor})`, async () => {
+  test(`the examples run end to end (FORCE_COLOR=${forceColor})`, async () => {
     const env = { ...process.env, FORCE_COLOR: forceColor };
     // Isolate the color mode without Node's conflicting-color-variable warnings.
     delete env.NO_COLOR;
@@ -25,19 +25,22 @@ for (const forceColor of ["0", "1"]) {
     if (forceColor === "1") assert.notEqual(stdout, text, "forced-color coverage must include ANSI output");
     else assert.equal(stdout, text);
     assert.match(text, /1\) Basic checked execution/u);
+    assert.match(text, /Streamed guest stdout: processing 3 values for Ada/u);
     assert.match(text, /total: 16/u);
+    assert.match(text, /Collected stdout: "exact stdout, collected by the caller\\n"/u);
     assert.match(text, /2\) Physical package module/u);
     assert.match(text, /distance: 5/u);
     assert.match(text, /3\) Network client as a plain package/u);
     assert.match(text, /value: 2, clientInstance: 1/u);
     assert.match(text, /value: 5, clientInstance: 1/u);
-    assert.match(text, /4\) Stdout process execution/u);
-    assert.match(text, /exact stdout from ProcExecutor/u);
-    assert.match(text, /5\) Agent harness adapter/u);
+    assert.match(text, /4\) Agent harness adapter/u);
     assert.match(text, /Model tools: listModules, execute/u);
-    assert.match(text, /Corrected tool result: 5/u);
-    assert.match(text, /6\) Reusable host module/u);
+    assert.match(text, /Stated limits: Each execution must finish within 30 seconds/u);
+    assert.match(text, /Corrected tool result: 5 with stdout "measuring\\n"/u);
+    assert.match(text, /5\) Reusable host module/u);
     assert.match(text, /Persistent host counter: 4/u);
-    assert.match(text, /Declarations reused across checks and both executor flavors/u);
+    assert.match(text, /Caught host error: increment\(amount\) takes one integer; total still 4/u);
+    assert.match(text, /Declarations reused across checks and executions/u);
+    assert.doesNotMatch(text, /Stdout process execution|ProcExecutor/u);
   });
 }

@@ -2,6 +2,10 @@
 
 > Executions accept a signal, a wall-clock deadline, and a per-stream retention cap; the guest process group is terminated on abort or timeout, and output is captured through pipes into bounded buffers.
 
+## Status
+
+Superseded by [Decision 0008](0008-one-executor-callers-own-limits-host-modules-carry-declarations.md) (2026-09-24), including the 0.2.1 amendment. Process-group termination on abort and pipe output that waits only for direct-child exit remain. The deadline, retention cap, grace option, truncation flags, and Proc output rules are gone: callers own deadlines (by aborting the signal) and output limits (through `onStdout`/`onStderr` sinks), and the process group is always reaped after exit.
+
 ## Context
 
 An agent harness runs model-written programs. A program whose `main` never settles previously hung the harness's tool call and everything serialized behind it, and a program that printed tens of megabytes produced a tool result of the same size. The executor offered no cancellation, no deadline, and captured stdout/stderr into regular files that grew without bound.

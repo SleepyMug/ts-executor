@@ -2,6 +2,10 @@
 
 > Schema-backed host functions use reusable physical packages and execution-scoped IPC without reusing child state.
 
+## Status
+
+Partly superseded by [Decision 0008](0008-one-executor-callers-own-limits-host-modules-carry-declarations.md) (2026-09-24). The schema-backed `hostFunction`/TypeBox contract and its schema validation are replaced by caller-supplied declarations text, a list of function names, and one `call` function. Generated packages, leases, disposal, and execution-scoped IPC still apply.
+
 ## Context
 
 Package-native clients solve child-owned libraries and network connections, but not live capabilities implemented by the calling host: closures, sessions, in-memory state, or already-connected clients. Requiring every caller to build a loopback server and client package obscures this common parent-child use case. The earlier generic callback API also required separately maintained declaration strings, risking implementation/type drift.

@@ -7,17 +7,10 @@ import {
   parseResultEnvelope,
   type ResultEnvelope,
 } from "../json-value.js";
-import type { ResolvedControl } from "../limits.js";
-import type { JsonValue, OutputTruncation } from "../types.js";
+import type { ResolvedControl } from "../control.js";
+import type { JsonValue } from "../types.js";
 import type { PreparedWorkspace } from "../workspace.js";
 import { runSubprocess, type SubprocessResult } from "./run-subprocess.js";
-
-export interface TSFuncProcessResult {
-  readonly value: JsonValue;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
-}
 
 interface TSFuncFiles {
   readonly input: string;
@@ -38,15 +31,6 @@ interface FailedTermination {
 type Termination = SuccessfulTermination | FailedTermination;
 
 const bootstrap = fileURLToPath(new URL("./ts-func-subprocess.js", import.meta.url));
-
-function outputError(error: Error, outcome: SubprocessResult): Error {
-  Object.defineProperties(error, {
-    stdout: { value: outcome.stdout, enumerable: true },
-    stderr: { value: outcome.stderr, enumerable: true },
-    truncated: { value: outcome.truncated, enumerable: true },
-  });
-  return error;
-}
 
 async function prepareFiles(workspace: PreparedWorkspace, inputEnvelope: string): Promise<TSFuncFiles> {
   const input = join(workspace.root, "input.json");
@@ -116,7 +100,7 @@ export async function runTSFuncProcess(
   cwd: string,
   inputEnvelope: string,
   control: ResolvedControl,
-): Promise<TSFuncProcessResult> {
+): Promise<JsonValue> {
   const files = await prepareFiles(workspace, inputEnvelope);
   const outcome = await runSubprocess(
     workspace,
@@ -125,18 +109,8 @@ export async function runTSFuncProcess(
     [workspace.entrypoint, files.input, files.result, files.resultTemporary],
     control,
   );
-  if (outcome.aborted !== undefined) {
-    throw new ExecutionAbortedError(outcome.aborted, {
-      ...outcome,
-      durationMs: performance.now() - control.startedAt,
-    });
-  }
+  if (outcome.aborted) throw new ExecutionAbortedError(performance.now() - control.startedAt);
   const termination = await classifyTermination(files, outcome);
-  if (!termination.ok) throw outputError(termination.error, outcome);
-  return Object.freeze({
-    value: termination.value,
-    stdout: outcome.stdout,
-    stderr: outcome.stderr,
-    truncated: outcome.truncated,
-  });
+  if (!termination.ok) throw termination.error;
+  return termination.value;
 }

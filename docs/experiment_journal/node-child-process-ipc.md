@@ -69,3 +69,24 @@ The JSON host-call channel can remain separate from the existing result/output c
 
 - [Node.js child process send and error events](https://nodejs.org/api/child_process.html)
 - [Node.js ESM resolution](https://nodejs.org/api/esm.html#resolution-and-loading-algorithm)
+
+## 2026-09-24: A child can crash its parent through Node's JSON IPC; a plain fd-3 pipe cannot
+
+### Context
+
+A lifecycle review probed whether a guest could harm its caller through the host-call channel, which was then Node IPC (`stdio: [..., "ipc"]`, `serialization: "json"`). The replacement needed a bidirectional, inherited, non-IPC descriptor that both processes can use as a stream. Node v24.15.0, Linux x64.
+
+### Finding
+
+- Node's JSON IPC splits the fd-3 byte stream on newlines and parses each line inside its own channel code, before emitting `message`. A child that writes `"not json\n"` to fd 3 with `fs.writeSync` makes that parser throw an uncaught `SyntaxError` in the parent, which exits. The parent's `message` and `error` listeners never run. A child that writes 700 MB without a newline crashes the parent with `RangeError: Invalid string length` in `parseChannelMessages`; 300 MB survived at a 563 MB peak RSS. (Review reproductions `n2-ipc-raw-fd.mjs` and `ipc-probe.mjs`, not retained.)
+- `spawn(..., { stdio: ["ignore", out, err, "pipe"] })` gives the parent a duplex `net.Socket` at `child.stdio[3]` (a socket pair; `fstat(3).isSocket()` in the child). In the child, `new net.Socket({ fd: 3, readable: true, writable: true })` reads and writes it. Data flows both ways, and destroying either end delivers `end` then `close` to the other. Raw `fs.writeSync(3, ...)` bytes arrive in the parent's `data` events like socket writes. The child's socket is ref'd, so it keeps the child's event loop alive, as the IPC channel did while it had listeners.
+
+### Implications
+
+- No listener-level guard makes Node IPC safe against a hostile child. A parent that must survive its child has to own the framing.
+- A plain `"pipe"` at fd 3, with newline framing, a per-line byte limit, and a parse that closes the channel on any violation, can carry the host-call protocol with no extra lifecycle beyond the child's.
+- Outcome: such a channel was built during the 0.4.0 review and then removed when the trust model was set ([Decision 0008](../decisions/0008-one-executor-callers-own-limits-host-modules-carry-declarations.md)). Host calls use Node IPC, and a guest writing raw bytes to its IPC descriptor can crash the caller; that is accepted.
+
+### References
+
+- [Node.js `child_process` `stdio` options](https://nodejs.org/api/child_process.html#optionsstdio)

@@ -27,7 +27,8 @@ async function execute(): Promise<void> {
       throw new TypeError('Program must export a function named "main"');
     }
     const value: unknown = await program.main(input.hasInput ? input.value : undefined);
-    envelopeText = `{"ok":true,"value":${stringifyJsonValue(value, "Execution result")}}`;
+    // A main that returns nothing (e.g. one that only prints) resolves to null.
+    envelopeText = `{"ok":true,"value":${stringifyJsonValue(value === undefined ? null : value, "Execution result")}}`;
     status = 0;
   } catch (error) {
     envelopeText = stringifyJsonValue(

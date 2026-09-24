@@ -3,11 +3,17 @@ import { readdir, rm, stat } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
-import { hostFunction, hostModule, Type } from "../dist/index.js";
+import { hostModule } from "../dist/index.js";
 import { project } from "./helpers.js";
 
 const require = createRequire(import.meta.url);
 const fs = require("node:fs/promises");
+
+const contract = {
+  declarations: "export declare function call(): Promise<null>;\n",
+  functions: ["call"],
+  call: () => null,
+};
 
 for (const stage of ["chmod", "package.json", "index.d.ts", "index.js"]) {
   test(`host artifact generation cleans partial packages after ${stage} failure`, async t => {
@@ -26,8 +32,7 @@ for (const stage of ["chmod", "package.json", "index.d.ts", "index.js"]) {
     syncBuiltinESMExports();
     try {
       await assert.rejects(hostModule({
-        resolutionRoot: root, specifier: "@host/failure",
-        functions: { call: hostFunction({ input: Type.Null(), output: Type.Null(), handler: () => null }) },
+        resolutionRoot: root, specifier: "@host/failure", ...contract,
       }), error => error === failure);
       assert.deepEqual(await readdir(join(root, ".ts-executor", "modules")), []);
     } finally {
@@ -61,7 +66,7 @@ for (const frozen of [false, true]) {
     syncBuiltinESMExports();
     try {
       await assert.rejects(hostModule({
-        resolutionRoot: root, specifier: "@host/failure", functions: {},
+        resolutionRoot: root, specifier: "@host/failure", ...contract, functions: [],
       }), error => error === failure);
       if (!frozen) assert.equal(failure.cleanupError, cleanup);
     } finally {
@@ -77,7 +82,9 @@ test("independent concurrent factories own different artifacts even for the same
   const root = await project(t);
   const options = {
     resolutionRoot: root, specifier: "@host/independent",
-    functions: { identity: hostFunction({ input: Type.String(), output: Type.String(), handler: value => value }) },
+    declarations: "export declare function identity(value: string): Promise<string>;\n",
+    functions: ["identity"],
+    call: (_fn, [value]) => value,
   };
   const modules = await Promise.all([hostModule(options), hostModule(options)]);
   try {

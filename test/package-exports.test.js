@@ -115,45 +115,36 @@ test("the packed public package has the intended files, declarations, and consum
       import assert from "node:assert/strict";
       import * as api from "ts-executor";
       assert.deepEqual(Object.keys(api).sort(), [
-        "DEFAULT_KILL_GRACE_MS",
-        "DEFAULT_MAX_OUTPUT_BYTES",
         "ExecutionAbortedError",
-        "ProcExecutionError",
-        "ProcExecutor",
         "RESERVED_ENVIRONMENT_NAMES",
         "TSFuncExecutor",
-        "Type",
         "TypeCheckError",
-        "hostFunction",
         "hostModule",
         "packageModule",
       ]);
-      const tsFunc = new api.TSFuncExecutor({ resolutionRoot: process.cwd() });
-      assert.equal("getTypes" in tsFunc, false);
-      assert.match(tsFunc.getInstructions(), /JSON function execution/);
-      const result = await tsFunc.execute({
-        source: "export function main(input: number): number { return input + 1; }",
+      assert.deepEqual(api.RESERVED_ENVIRONMENT_NAMES, ["TSX_TSCONFIG_PATH", "__TS_EXECUTOR_RESTORE_ENVIRONMENT"]);
+      const executor = new api.TSFuncExecutor({ resolutionRoot: process.cwd() });
+      assert.equal("getTypes" in executor, false);
+      assert.match(executor.getInstructions(), /JSON function execution/);
+      let stdout = "";
+      const result = await executor.execute({
+        source: "export function main(input: number): number { process.stdout.write('exact'); return input + 1; }",
         cwd: process.cwd(),
         input: 4,
+        onStdout: (text) => { stdout += text; },
       });
+      assert.deepEqual(Object.keys(result).sort(), ["durationMs", "value"]);
       assert.equal(result.value, 5);
-      const proc = new api.ProcExecutor({ resolutionRoot: process.cwd() });
-      assert.equal("getTypes" in proc, false);
-      assert.match(proc.getInstructions(), /Stdout process execution/);
-      assert.equal(await proc.execute({
-        source: "export function main(): void { process.stdout.write('exact'); }",
-        cwd: process.cwd(),
-      }), "exact");
-      assert.equal(typeof api.ProcExecutionError, "function");
+      assert.equal(stdout, "exact");
       const host = await api.hostModule({
         resolutionRoot: process.cwd(), specifier: "@host/packed",
-        functions: { greet: api.hostFunction({
-          input: api.Type.String(), output: api.Type.String(), handler: name => "Hello " + name,
-        }) },
+        declarations: "export declare function greet(name: string): Promise<string>;\\n",
+        functions: ["greet"],
+        call: (_fn, [name]) => "Hello " + name,
       });
       try {
-        tsFunc.modules.register(host);
-        assert.equal((await tsFunc.execute({
+        executor.modules.register(host);
+        assert.equal((await executor.execute({
           cwd: process.cwd(),
           source: 'import { greet } from "@host/packed"; export async function main() { return greet("packed"); }',
         })).value, "Hello packed");
@@ -167,70 +158,80 @@ test("the packed public package has the intended files, declarations, and consum
     `
       import {
         ExecutionAbortedError,
-        ProcExecutionError,
-        ProcExecutor,
+        RESERVED_ENVIRONMENT_NAMES,
         TSFuncExecutor,
         TypeCheckError,
-        packageModule,
-        Type,
-        hostFunction,
         hostModule,
+        packageModule,
+        type CheckRequest,
+        type CheckResult,
+        type Diagnostic,
+        type DiagnosticCategory,
+        type ExecutionControl,
+        type ExecutorOptions,
+        type HostCall,
         type HostCallContext,
-        type HostFunction,
         type HostModule,
         type HostModuleOptions,
-        type CheckResult,
-        type ExecutorOptions,
         type JsonValue,
+        type ListModulesRequest,
+        type MaterializeContext,
+        type MaterializedModule,
         type Module,
         type ModuleSummary,
-        type ProcExecuteRequest,
-        type ProcExecuteResult,
-        type ExecutionControl,
-        type OutputTruncation,
+        type PackageModuleOptions,
         type TSFuncExecuteRequest,
         type TSFuncExecuteResult,
       } from "ts-executor";
 
-      const fn: HostFunction = hostFunction({
-        input: Type.Object({ id: Type.Number() }), output: Type.String(),
-        handler(input, context) {
-          const ctx: HostCallContext = context;
-          const id: number = input.id;
-          // @ts-expect-error input is inferred, not any
-          const bad: string = input.id;
-          return String(id);
-        },
-      });
-      const hostOptions: HostModuleOptions = {
-        resolutionRoot: ".", specifier: "@host/typed", functions: { lookup: fn },
+      const call: HostCall = async (fn, args, context) => {
+        const ctx: HostCallContext = context;
+        const first: JsonValue | undefined = args[0];
+        return { fn, count: args.length, first: first ?? null, aborted: ctx.signal.aborted };
       };
+      // @ts-expect-error A host call must return JSON.
+      const dated: HostCall = () => new Date();
+      // @ts-expect-error The arguments a host call receives are read-only.
+      const mutating: HostCall = (_fn, args) => { args.push(1); return null; };
+      const hostOptions: HostModuleOptions = {
+        resolutionRoot: ".", specifier: "@host/typed",
+        declarations: "export declare function lookup(id: number): Promise<string>;\\n",
+        functions: ["lookup"], call,
+      };
+      // @ts-expect-error functions lists names; handlers and schemas are gone.
+      const handlerMap: HostModuleOptions = { ...hostOptions, functions: { lookup: call } };
+      // @ts-expect-error declarations are required text.
+      const undeclared: HostModuleOptions = { resolutionRoot: ".", specifier: "@host/untyped", functions: [], call };
       const hostPromise: Promise<HostModule> = hostModule(hostOptions);
-      void hostPromise.then(host => { const module: Module = host; return host.dispose(); });
+      void hostPromise.then(host => { const module: Module = host; void module; return host.dispose(); });
+      void dated;
+      void mutating;
+      void handlerMap;
+      void undeclared;
+
       const options: ExecutorOptions = { resolutionRoot: "." };
       const executor = new TSFuncExecutor(options);
-      const proc = new ProcExecutor(options);
-      const sameRegistryType: typeof executor.modules = proc.modules;
-      const module: Module = packageModule({
-        specifier: "@fixture/smoke",
-        root: ".",
-      });
-      const json: JsonValue = { okay: true };
-      void executor;
-      void json;
-      void module;
-      void sameRegistryType;
       const instructions: string = executor.getInstructions();
-      const procInstructions: string = proc.getInstructions();
-      const modules: Promise<readonly ModuleSummary[]> = executor.listModules();
-      const procModules: Promise<readonly ModuleSummary[]> = proc.listModules({ query: "smoke" });
+      // @ts-expect-error Instructions take no options; limits are the caller's to state.
+      void executor.getInstructions({ timeoutMs: 1000 });
+      const packageOptions: PackageModuleOptions = { specifier: "@fixture/smoke", root: "." };
+      const module: Module = packageModule(packageOptions);
+      const custom: Module = {
+        specifier: "@fixture/custom",
+        packageRoot: "/tmp",
+        async materialize(context: MaterializeContext): Promise<MaterializedModule> {
+          return { packageRoot: context.packageRoot };
+        },
+      };
+      executor.modules.register(custom);
+      const listRequest: ListModulesRequest = { query: "smoke" };
+      const modules: Promise<readonly ModuleSummary[]> = executor.listModules(listRequest);
       void modules.then((entries) => entries.map((entry): string => entry.packageRoot));
-      void procModules;
-      // @ts-expect-error Declaration retrieval has been removed from both executors.
+      // @ts-expect-error Declaration retrieval has been removed.
       void executor.getTypes("@fixture/smoke");
-      // @ts-expect-error Declaration retrieval has been removed from both executors.
-      void proc.getTypes("@fixture/smoke");
-      const checked: Promise<CheckResult> = executor.check({ source: "export function main() {}" });
+      const checkRequest: CheckRequest = { source: "export function main() { return null; }" };
+      const checked: Promise<CheckResult> = executor.check(checkRequest);
+      void checked.then(({ diagnostics }) => diagnostics.map((entry: Diagnostic): DiagnosticCategory => entry.category));
       const tsFuncRequest: TSFuncExecuteRequest<number> = {
         source: "export function main(input: number) { return input; }",
         cwd: ".",
@@ -238,45 +239,39 @@ test("the packed public package has the intended files, declarations, and consum
       };
       const executed: Promise<TSFuncExecuteResult<number>> =
         executor.execute<number, number>(tsFuncRequest);
-      const procRequest: ProcExecuteRequest = {
-        source: "export function main(): void {}",
-        cwd: ".",
+      void executed.then((result) => {
+        const value: number = result.value;
+        const duration: number = result.durationMs;
+        // @ts-expect-error Output goes to the caller's sinks, not into the result.
+        void result.stdout;
+        return value + duration;
+      });
+      const control: ExecutionControl = {
+        signal: AbortSignal.any([new AbortController().signal, AbortSignal.timeout(1000)]),
+        env: { RUN_ID: "call-7" },
+        onStdout: (text: string) => { void text; },
+        onStderr: (text) => { const chunk: string = text; void chunk; },
       };
-      const stdout: Promise<string> = proc.execute(procRequest);
-      const detailed: Promise<ProcExecuteResult> = proc.executeDetailed(procRequest);
-      const control: ExecutionControl = { timeoutMs: 1000, maxOutputBytes: 1024, signal: new AbortController().signal, killGroupOnExit: true, env: { RUN_ID: "call-7" } };
       void executor.execute({ ...tsFuncRequest, ...control });
-      // @ts-expect-error timeoutMs is a number.
-      void proc.execute({ ...procRequest, timeoutMs: "1s" });
-      declare const abortedError: ExecutionAbortedError;
-      const reason: "signal" | "timeout" = abortedError.reason;
-      const abortedOutput: OutputTruncation = abortedError.truncated;
-      void reason;
-      void abortedOutput;
-      void detailed;
-      // @ts-expect-error ProcExecutor has no input contract.
-      void proc.execute({ ...procRequest, input: null });
-      // @ts-expect-error ProcExecutor requires cwd.
-      void proc.execute({ source: procRequest.source });
+      // @ts-expect-error Deadlines are the caller's: abort the signal instead.
+      void executor.execute({ source: "", cwd: ".", timeoutMs: 1000 });
+      // @ts-expect-error Output limits are the caller's: bound what the sinks keep.
+      void executor.execute({ source: "", cwd: ".", maxOutputBytes: 1024 });
+      // @ts-expect-error Leftover processes are always killed; there is no option.
+      void executor.execute({ source: "", cwd: ".", killGroupOnExit: true });
+      // @ts-expect-error Sinks receive text.
+      void executor.execute({ source: "", cwd: ".", onStdout: (chunk: Buffer) => chunk });
       // @ts-expect-error TSFuncExecutor generic values must be JSON.
       void executor.execute<Date, JsonValue>({ ...tsFuncRequest, input: new Date() });
-      declare const procError: ProcExecutionError;
-      const errorOutput: string = procError.stdout;
-      const errorDetail: string = procError.stderr;
-      const errorCode: number | null = procError.exitCode;
-      const errorSignal: NodeJS.Signals | null = procError.signal;
-      const errorTruncated: OutputTruncation = procError.truncated;
-      void errorTruncated;
-      void errorOutput;
-      void errorDetail;
-      void errorCode;
-      void errorSignal;
-      void checked;
-      void executed;
+      declare const abortedError: ExecutionAbortedError;
+      const abortedAfter: number = abortedError.durationMs;
+      // @ts-expect-error The caller knows why its own signal aborted.
+      void abortedError.reason;
+      const reserved: readonly string[] = RESERVED_ENVIRONMENT_NAMES;
+      void abortedAfter;
+      void reserved;
+      void module;
       void instructions;
-      void procInstructions;
-      void stdout;
-      void ProcExecutionError;
       void TypeCheckError;
     `,
   );

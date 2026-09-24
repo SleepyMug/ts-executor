@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ProcExecutor, TSFuncExecutor } from "../dist/index.js";
+import { TSFuncExecutor } from "../dist/index.js";
 import { project, workspaceNames } from "./helpers.js";
 
 const READ_ENV = `
@@ -94,20 +94,4 @@ test("env rejects values that cannot be environment entries", async (t) => {
     executor.execute({ source: READ_ENV, cwd: root, input: { name: "A" }, env: ["A"] }),
     (error) => error instanceof TypeError && /must be an object of string values/u.test(error.message),
   );
-});
-
-test("ProcExecutor takes env on the same terms", async (t) => {
-  const root = await project(t);
-  const executor = new ProcExecutor({ resolutionRoot: root });
-  const stdout = await executor.execute({
-    source: `
-      export function main(): void {
-        process.stdout.write(process.env.AGUI_RUN ?? "none");
-      }
-    `,
-    cwd: root,
-    env: { AGUI_RUN: "proc-1" },
-  });
-  assert.equal(stdout, "proc-1");
-  assert.equal(process.env.AGUI_RUN, undefined);
 });

@@ -4,9 +4,9 @@ import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { TSFuncExecutor, packageModule } from "../dist/index.js";
-import { project, workspaceNames, writePackage } from "./helpers.js";
+import { alive, collect, project, workspaceNames, writePackage } from "./helpers.js";
 
-test("execution uses fresh processes, supports sync and async main, captures output, and cleans up", async (t) => {
+test("execution uses fresh processes, supports sync and async main, delivers output, and cleans up", async (t) => {
   const root = await project(t);
   const statePackage = await writePackage(
     root,
@@ -33,8 +33,10 @@ test("execution uses fresh processes, supports sync and async main, captures out
       return bump();
     }
   `;
-  const first = await executor.execute({ source, cwd: root, input: { label: "one" } });
-  const second = await executor.execute({ source, cwd: root, input: { label: "two" } });
+  const firstOutput = collect();
+  const secondOutput = collect();
+  const first = await executor.execute({ source, cwd: root, input: { label: "one" }, ...firstOutput.sinks });
+  const second = await executor.execute({ source, cwd: root, input: { label: "two" }, ...secondOutput.sinks });
   const synchronous = await executor.execute({
     cwd: root,
     source: "export function main(input: number): number { return input + 1; }\n",
@@ -44,10 +46,12 @@ test("execution uses fresh processes, supports sync and async main, captures out
   assert.equal(first.value, 1);
   assert.equal(second.value, 1);
   assert.equal(synchronous.value, 5);
-  assert.equal(first.stdout, "out:one\n");
-  assert.equal(first.stderr, "err:one\n");
-  assert.equal(second.stdout, "out:two\n");
-  assert.equal(second.stderr, "err:two\n");
+  assert.equal(firstOutput.stdout(), "out:one\n");
+  assert.equal(firstOutput.stderr(), "err:one\n");
+  assert.equal(secondOutput.stdout(), "out:two\n");
+  assert.equal(secondOutput.stderr(), "err:two\n");
+  assert.deepEqual(Object.keys(first).sort(), ["durationMs", "value"]);
+  assert.ok(Object.isFrozen(first));
   assert.ok(first.durationMs > 0);
   assert.deepEqual(await workspaceNames(root), []);
 });
@@ -87,8 +91,10 @@ test("guest intrinsic mutations cannot bypass JSON checks or completion", { time
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });
 
+  const output = collect();
   const valid = await executor.execute({
     cwd: root,
+    ...output.sinks,
     source: `
       export function main() {
         process.stdout.cork();
@@ -102,7 +108,7 @@ test("guest intrinsic mutations cannot bypass JSON checks or completion", { time
     `,
   });
   assert.deepEqual(valid.value, { okay: true, list: [1, 2] });
-  assert.equal(valid.stdout, "corked output\n");
+  assert.equal(output.stdout(), "corked output\n");
 
   await assert.rejects(
     executor.execute({
@@ -123,8 +129,10 @@ test("guest intrinsic mutations cannot bypass JSON checks or completion", { time
 test("terminal output flush ignores guest-shadowed cork counters and reaps the child", { timeout: 5_000 }, async (t) => {
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
   const result = await executor.execute({
     cwd: root,
+    ...output.sinks,
     source: `
       export function main(): number {
         process.stdout.write("positive shadow\\n");
@@ -140,8 +148,8 @@ test("terminal output flush ignores guest-shadowed cork counters and reaps the c
     `,
   });
 
-  assert.equal(result.stdout, "positive shadow\n");
-  assert.equal(result.stderr, "zero shadow after cork\n");
+  assert.equal(output.stdout(), "positive shadow\n");
+  assert.equal(output.stderr(), "zero shadow after cork\n");
   assert.throws(
     () => process.kill(result.value, 0),
     (error) => error?.code === "ESRCH",
@@ -169,83 +177,82 @@ test("completed execution exits and reaps the direct subprocess despite retained
   assert.deepEqual(await workspaceNames(root), []);
 });
 
-test("large UTF-8 stdout and stderr are exact on success", async (t) => {
+test("large UTF-8 stdout and stderr are delivered exactly", async (t) => {
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
   const result = await executor.execute({
     cwd: root,
+    ...output.sinks,
     source: `
       export function main(): string {
-        process.stdout.write("α".repeat(131_072));
+        process.stdout.write("€".repeat(87_382));
         process.stderr.write("β".repeat(131_072));
         return "done";
       }
     `,
   });
   assert.equal(result.value, "done");
-  assert.equal(result.stdout, "α".repeat(131_072));
-  assert.equal(result.stderr, "β".repeat(131_072));
+  assert.equal(output.stdout(), "€".repeat(87_382));
+  assert.equal(output.stderr(), "β".repeat(131_072));
+  assert.ok(output.chunks.stdout.length > 1, "a large write arrives as several chunks");
+  // 3-byte characters straddle read boundaries; the decoder must never split one.
+  assert.ok(output.chunks.stdout.every((chunk) => /^€+$/u.test(chunk)), "no chunk splits a character");
 });
 
-test("descendant-held output descriptors do not delay direct-child completion", { timeout: 8_000 }, async (t) => {
+test("descendant-held output descriptors neither delay completion nor reach the sink afterwards", { timeout: 15_000 }, async (t) => {
   const root = await project(t);
-  const started = join(root, "descendant-started");
   const release = join(root, "descendant-release");
   const finished = join(root, "descendant-finished");
   const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
   const result = await executor.execute({
     cwd: root,
-    input: { started, release, finished },
+    input: { release, finished },
+    ...output.sinks,
     source: `
-      import { existsSync } from "node:fs";
       import { spawn } from "node:child_process";
 
-      interface Input {
-        readonly started: string;
-        readonly release: string;
-        readonly finished: string;
-      }
-
-      export async function main(input: Input): Promise<string> {
+      export async function main(input: { release: string; finished: string }): Promise<number> {
         const childSource = [
           'const fs = require("node:fs");',
           'const paths = JSON.parse(process.argv[1]);',
-          'let done = false;',
-          'function finish() {',
-          '  if (done) return;',
-          '  done = true;',
-          '  process.stdout.write("late descendant\\\\n");',
-          '  fs.writeFileSync(paths.finished, "done");',
-          '  process.exit(0);',
-          '}',
-          'fs.writeFileSync(paths.started, "started");',
           'const interval = setInterval(() => {',
-          '  if (fs.existsSync(paths.release)) {',
-          '    clearInterval(interval);',
-          '    finish();',
-          '  }',
+          '  if (!fs.existsSync(paths.release)) return;',
+          '  clearInterval(interval);',
+          '  let outcome = "written";',
+          '  try { fs.writeSync(1, "late descendant\\\\n"); } catch (error) { outcome = error.code; }',
+          '  fs.writeFileSync(paths.finished, outcome);',
+          '  process.exit(0);',
           '}, 10);',
-          'setTimeout(finish, 2_000);',
+          'setTimeout(() => process.exit(1), 10_000);',
+          'process.send("started");',
         ].join("\\n");
-        spawn(process.execPath, ["-e", childSource, JSON.stringify(input)], {
-          stdio: ["ignore", 1, 2],
+        // Its own session: outside the process group, so the final reaping cannot reach it.
+        const descendant = spawn(process.execPath, ["-e", childSource, JSON.stringify(input)], {
+          detached: true,
+          stdio: ["ignore", 1, 2, "ipc"],
         });
-        while (!existsSync(input.started)) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 10));
-        }
+        await new Promise<void>((resolve) => descendant.once("message", () => resolve()));
+        descendant.disconnect();
+        descendant.unref();
         console.log("direct child");
-        return "done";
+        return descendant.pid!;
       }
     `,
   });
+  const descendant = result.value;
+  t.after(() => {
+    try { process.kill(descendant, "SIGKILL"); } catch { /* already gone */ }
+  });
 
-  assert.equal(result.value, "done");
-  assert.equal(result.stdout, "direct child\n");
+  assert.equal(output.stdout(), "direct child\n");
+  assert.equal(alive(descendant), true, "a descendant that left the process group outlives the execution");
   await assert.rejects(readFile(finished), (error) => error?.code === "ENOENT");
 
   await writeFile(release, "release");
   let finishedText;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     try {
       finishedText = await readFile(finished, "utf8");
       break;
@@ -254,16 +261,19 @@ test("descendant-held output descriptors do not delay direct-child completion", 
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }
-  assert.equal(finishedText, "done");
+  assert.equal(finishedText, "EPIPE", "the host closed its end of the pipe when the execution settled");
+  assert.equal(output.stdout(), "direct child\n", "nothing is delivered after the execution settles");
   assert.deepEqual(await workspaceNames(root), []);
 });
 
-test("user errors retain name, message, stack, and captured output", async (t) => {
+test("user errors are the guest's own error, while its output still reaches the sinks", async (t) => {
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
   await assert.rejects(
     executor.execute({
       cwd: root,
+      ...output.sinks,
       source: `
         export function main(): never {
           console.log("before failure");
@@ -276,11 +286,14 @@ test("user errors retain name, message, stack, and captured output", async (t) =
       assert.equal(error?.name, "RangeError");
       assert.equal(error?.message, "runtime failed");
       assert.match(error?.stack, /runtime failed/u);
-      assert.equal(error?.stdout, "before failure\n");
-      assert.equal(error?.stderr, "failure detail\n");
+      for (const removed of ["stdout", "stderr", "truncated"]) {
+        assert.equal(Object.hasOwn(error, removed), false, `errors carry no ${removed}`);
+      }
       return true;
     },
   );
+  assert.equal(output.stdout(), "before failure\n");
+  assert.equal(output.stderr(), "failure detail\n");
   assert.deepEqual(await workspaceNames(root), []);
 });
 
@@ -296,13 +309,15 @@ test("arbitrary thrown values are reduced to safe errors", async (t) => {
   );
 });
 
-test("early exits, malformed result files, and signals are process failures with output", async (t) => {
+test("early exits, malformed result files, and signals are process failures", async (t) => {
   const root = await project(t);
   const executor = new TSFuncExecutor({ resolutionRoot: root });
 
+  const early = collect();
   await assert.rejects(
     executor.execute({
       cwd: root,
+      ...early.sinks,
       source: `
         export function main(): never {
           console.log("early");
@@ -310,13 +325,10 @@ test("early exits, malformed result files, and signals are process failures with
         }
       `,
     }),
-    (error) => {
-      assert.match(error?.message, /code 0 without a valid success result/u);
-      assert.equal(error?.stdout, "early\n");
-      assert.equal(error?.stderr, "");
-      return true;
-    },
+    /code 0 without a valid success result/u,
   );
+  assert.equal(early.stdout(), "early\n");
+  assert.equal(early.stderr(), "");
 
   await assert.rejects(
     executor.execute({
@@ -365,9 +377,11 @@ test("early exits, malformed result files, and signals are process failures with
   );
 
   if (process.platform !== "win32") {
+    const signalled = collect();
     await assert.rejects(
       executor.execute({
         cwd: root,
+        ...signalled.sinks,
         source: `
           import { writeSync } from "node:fs";
           export function main(): never {
@@ -377,12 +391,9 @@ test("early exits, malformed result files, and signals are process failures with
           }
         `,
       }),
-      (error) => {
-        assert.match(error?.message, /signal SIGTERM/u);
-        assert.equal(error?.stderr, "signalled\n");
-        return true;
-      },
+      /signal SIGTERM/u,
     );
+    assert.equal(signalled.stderr(), "signalled\n");
   }
   assert.deepEqual(await workspaceNames(root), []);
 });
@@ -572,9 +583,9 @@ test("execution cleans workspaces after result and materialization failures", as
   await assert.rejects(
     executor.execute({
       cwd: root,
-      source: "export function main(): undefined { return undefined; }\n",
+      source: "export function main(): bigint { return 1n; }\n",
     }),
-    /Execution result.*unsupported type undefined/u,
+    /Execution result.*unsupported type bigint/u,
   );
   assert.deepEqual(await workspaceNames(root), []);
 
@@ -591,4 +602,28 @@ test("execution cleans workspaces after result and materialization failures", as
     /materialization failed/u,
   );
   assert.deepEqual(await workspaceNames(root), []);
+});
+
+test("a main that returns nothing resolves to null", async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const output = collect();
+  const result = await executor.execute({
+    source: "export function main(): void { process.stdout.write('printed'); }\n",
+    cwd: root,
+    ...output.sinks,
+  });
+  assert.equal(result.value, null);
+  assert.equal(output.stdout(), "printed");
+});
+
+test("options whose job moved to the caller are refused, not ignored", async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  for (const option of ["timeoutMs", "maxOutputBytes", "killGraceMs", "killGroupOnExit"]) {
+    await assert.rejects(
+      executor.execute({ source: "export function main() { return 1; }\n", cwd: root, [option]: 1 }),
+      new RegExp(`execute\\.${option} was removed in 0\\.4`),
+    );
+  }
 });

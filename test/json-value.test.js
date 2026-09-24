@@ -189,3 +189,14 @@ test("supplied non-JSON input is rejected before a workspace is created", async 
     assert.deepEqual(await workspaceNames(root), []);
   }
 });
+
+test("validation is linear in array length: a flat array of a million elements validates quickly", { timeout: 20_000 }, () => {
+  const value = new Array(1_000_000).fill(0);
+  const started = performance.now();
+  assert.equal(normalizeJsonValue(value).length, 1_000_000);
+  // Quadratic validation took 7.7 s for 100 000 elements; a million would take over ten minutes.
+  assert.ok(performance.now() - started < 5_000, `took ${performance.now() - started} ms`);
+  const holey = [1, , 3];
+  holey.extra = true;
+  assert.throws(() => normalizeJsonValue(holey), /at \$\[1\] must be an enumerable data property/u);
+});

@@ -3,7 +3,7 @@ import { cp, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { ProcExecutor, TSFuncExecutor, TypeCheckError, packageModule } from "../dist/index.js";
+import { TSFuncExecutor, TypeCheckError, packageModule } from "../dist/index.js";
 import { project, workspaceNames, writePackage } from "./helpers.js";
 
 test("module paths expose package interfaces and preserve NodeNext exports and subpaths", async (t) => {
@@ -92,94 +92,92 @@ test("untyped packages are discoverable but checked execution rejects their impo
   }), (error) => error instanceof TypeCheckError && error.diagnostics.some(({ code }) => code === 7016));
 });
 
-for (const Executor of [TSFuncExecutor, ProcExecutor]) {
-  test(`${Executor.name} keeps discovery files while custom runtime packages are created and cleaned per operation`, async (t) => {
-    const root = await project(t);
-    const declaration = "export function runtimeLocation(): string;\n";
-    const discoveryRoot = await writePackage(root, "@fixture/custom", {
-      "index.js": "export function runtimeLocation() { return import.meta.url; }\n",
-      "index.d.ts": declaration,
-    }, { exports: { ".": { types: "./index.d.ts", import: "./index.js" } } });
-    const executor = new Executor({ resolutionRoot: root });
-    const runtimeRoots = [];
-    executor.modules.register({
-      specifier: "@fixture/custom",
-      packageRoot: discoveryRoot,
-      async materialize({ packageRoot, workspaceRoot }) {
-        assert.ok(isAbsolute(packageRoot));
-        assert.equal(relative(workspaceRoot, packageRoot), join(".modules", "0"));
-        await cp(discoveryRoot, packageRoot, { recursive: true });
-        runtimeRoots.push(packageRoot);
-        return { packageRoot };
-      },
-    });
+test("keeps discovery files while custom runtime packages are created and cleaned per operation", async (t) => {
+  const root = await project(t);
+  const declaration = "export function runtimeLocation(): string;\n";
+  const discoveryRoot = await writePackage(root, "@fixture/custom", {
+    "index.js": "export function runtimeLocation() { return import.meta.url; }\n",
+    "index.d.ts": declaration,
+  }, { exports: { ".": { types: "./index.d.ts", import: "./index.js" } } });
+  const executor = new TSFuncExecutor({ resolutionRoot: root });
+  const runtimeRoots = [];
+  executor.modules.register({
+    specifier: "@fixture/custom",
+    packageRoot: discoveryRoot,
+    async materialize({ packageRoot, workspaceRoot }) {
+      assert.ok(isAbsolute(packageRoot));
+      assert.equal(relative(workspaceRoot, packageRoot), join(".modules", "0"));
+      await cp(discoveryRoot, packageRoot, { recursive: true });
+      runtimeRoots.push(packageRoot);
+      return { packageRoot };
+    },
+  });
 
-    const catalog = await executor.listModules();
-    assert.deepEqual(catalog, [{ specifier: "@fixture/custom", packageRoot: discoveryRoot }]);
-    assert.equal(runtimeRoots.length, 0);
-    const manifest = JSON.parse(await readFile(join(catalog[0].packageRoot, "package.json"), "utf8"));
-    const declarationPath = join(catalog[0].packageRoot, manifest.exports["."].types);
-    assert.equal(await readFile(declarationPath, "utf8"), declaration);
-    const source = `
-      import { runtimeLocation } from "@fixture/custom";
-      export function main() {
-        ${Executor === TSFuncExecutor ? "return runtimeLocation();" : "process.stdout.write(runtimeLocation());"}
-      }
-    `;
-    assert.equal((await executor.check({ source })).ok, true);
-    assert.equal(runtimeRoots.length, 1);
-    await assert.rejects(stat(runtimeRoots[0]), { code: "ENOENT" });
-
-    for (let run = 0; run < 2; run += 1) {
-      const result = await executor.execute({ source, cwd: root });
-      const location = Executor === TSFuncExecutor ? result.value : result;
-      const runtimeRoot = runtimeRoots.at(-1);
-      assert.equal(location, pathToFileURL(join(runtimeRoot, "index.js")).href);
-      assert.notEqual(runtimeRoot, discoveryRoot);
-      await assert.rejects(stat(runtimeRoot), { code: "ENOENT" });
-      assert.equal(await readFile(declarationPath, "utf8"), declaration);
-      assert.deepEqual(await executor.listModules(), catalog);
-      assert.deepEqual(await workspaceNames(root), []);
+  const catalog = await executor.listModules();
+  assert.deepEqual(catalog, [{ specifier: "@fixture/custom", packageRoot: discoveryRoot }]);
+  assert.equal(runtimeRoots.length, 0);
+  const manifest = JSON.parse(await readFile(join(catalog[0].packageRoot, "package.json"), "utf8"));
+  const declarationPath = join(catalog[0].packageRoot, manifest.exports["."].types);
+  assert.equal(await readFile(declarationPath, "utf8"), declaration);
+  const source = `
+    import { runtimeLocation } from "@fixture/custom";
+    export function main() {
+      return runtimeLocation();
     }
-    assert.equal(runtimeRoots.length, 3);
-    assert.equal(new Set(runtimeRoots).size, 3);
-  });
+  `;
+  assert.equal((await executor.check({ source })).ok, true);
+  assert.equal(runtimeRoots.length, 1);
+  await assert.rejects(stat(runtimeRoots[0]), { code: "ENOENT" });
 
-  test(`${Executor.name} lists immutable, filtered package metadata without materializing`, async (t) => {
-    const root = await project(t);
-    const executor = new Executor({ resolutionRoot: join(root, "no-workspace-root") });
-    assert.deepEqual(await executor.listModules(), []);
-    const module = {
-      specifier: "@fixture/first",
-      packageRoot: join(root, "first"),
-      description: "Arithmetic helpers.",
-      async materialize() { throw new Error("discovery must not materialize"); },
-    };
-    executor.modules.register(module);
-    const pending = executor.listModules();
-    module.specifier = "@fixture/changed";
-    module.packageRoot = join(root, "changed");
-    module.description = "Changed.";
-    executor.modules.register({
-      specifier: "@fixture/second",
-      packageRoot: join(root, "second"),
-      materialize: module.materialize,
-    });
-
-    const first = { specifier: "@fixture/first", packageRoot: join(root, "first"), description: "Arithmetic helpers." };
-    const second = { specifier: "@fixture/second", packageRoot: join(root, "second") };
-    const listed = await pending;
-    assert.deepEqual(listed, [first]);
-    assert.ok(Object.isFrozen(listed));
-    assert.ok(Object.isFrozen(listed[0]));
-    assert.deepEqual(await executor.listModules(), [first, second]);
-    assert.deepEqual(await executor.listModules({ query: "  " }), [first, second]);
-    assert.deepEqual(await executor.listModules({ query: " ARITHMETIC " }), [first]);
-    assert.deepEqual(await executor.listModules({ query: "SECOND" }), [second]);
-    assert.deepEqual(await executor.listModules({ query: "absent" }), []);
+  for (let run = 0; run < 2; run += 1) {
+    const result = await executor.execute({ source, cwd: root });
+    const location = result.value;
+    const runtimeRoot = runtimeRoots.at(-1);
+    assert.equal(location, pathToFileURL(join(runtimeRoot, "index.js")).href);
+    assert.notEqual(runtimeRoot, discoveryRoot);
+    await assert.rejects(stat(runtimeRoot), { code: "ENOENT" });
+    assert.equal(await readFile(declarationPath, "utf8"), declaration);
+    assert.deepEqual(await executor.listModules(), catalog);
     assert.deepEqual(await workspaceNames(root), []);
+  }
+  assert.equal(runtimeRoots.length, 3);
+  assert.equal(new Set(runtimeRoots).size, 3);
+});
+
+test("lists immutable, filtered package metadata without materializing", async (t) => {
+  const root = await project(t);
+  const executor = new TSFuncExecutor({ resolutionRoot: join(root, "no-workspace-root") });
+  assert.deepEqual(await executor.listModules(), []);
+  const module = {
+    specifier: "@fixture/first",
+    packageRoot: join(root, "first"),
+    description: "Arithmetic helpers.",
+    async materialize() { throw new Error("discovery must not materialize"); },
+  };
+  executor.modules.register(module);
+  const pending = executor.listModules();
+  module.specifier = "@fixture/changed";
+  module.packageRoot = join(root, "changed");
+  module.description = "Changed.";
+  executor.modules.register({
+    specifier: "@fixture/second",
+    packageRoot: join(root, "second"),
+    materialize: module.materialize,
   });
-}
+
+  const first = { specifier: "@fixture/first", packageRoot: join(root, "first"), description: "Arithmetic helpers." };
+  const second = { specifier: "@fixture/second", packageRoot: join(root, "second") };
+  const listed = await pending;
+  assert.deepEqual(listed, [first]);
+  assert.ok(Object.isFrozen(listed));
+  assert.ok(Object.isFrozen(listed[0]));
+  assert.deepEqual(await executor.listModules(), [first, second]);
+  assert.deepEqual(await executor.listModules({ query: "  " }), [first, second]);
+  assert.deepEqual(await executor.listModules({ query: " ARITHMETIC " }), [first]);
+  assert.deepEqual(await executor.listModules({ query: "SECOND" }), [second]);
+  assert.deepEqual(await executor.listModules({ query: "absent" }), []);
+  assert.deepEqual(await workspaceNames(root), []);
+});
 
 test("custom modules require an absolute package root for discovery", () => {
   const executor = new TSFuncExecutor({ resolutionRoot: process.cwd() });

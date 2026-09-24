@@ -1,18 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import type { ResolvedControl } from "../limits.js";
-import type { AbortReason, OutputTruncation } from "../types.js";
+import type { Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
+import { KILL_GRACE_MS, type OutputSink, type ResolvedControl } from "../control.js";
 import type { PreparedWorkspace } from "../workspace.js";
 import { attachHostBridge } from "./host-bridge.js";
 
 export interface SubprocessResult {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly truncated: OutputTruncation;
-  /** Set when the host terminated the process group on abort or deadline. */
-  readonly aborted?: AbortReason;
+  /**
+   * True when the caller's signal aborted before the child's exit was observed: the
+   * group was terminated, or nothing was spawned because it had already aborted.
+   */
+  readonly aborted: boolean;
+  /** A process-level failure, or the error an output sink threw. */
   readonly error?: Error;
 }
 
@@ -46,43 +48,8 @@ function environment(workspace: PreparedWorkspace, control: ResolvedControl): No
   };
 }
 
-/**
- * Retains at most `limit` bytes of a stream and discards the rest. Bytes beyond the
- * limit are still consumed so the guest is never blocked on a full pipe.
- */
-class BoundedCapture {
-  readonly #limit: number;
-  readonly #chunks: Buffer[] = [];
-  #retained = 0;
-  #truncated = false;
-
-  constructor(limit: number) {
-    this.#limit = limit;
-  }
-
-  push(chunk: Buffer): void {
-    const room = this.#limit - this.#retained;
-    if (room <= 0) {
-      if (chunk.length > 0) this.#truncated = true;
-      return;
-    }
-    if (chunk.length <= room) {
-      this.#chunks.push(chunk);
-      this.#retained += chunk.length;
-      return;
-    }
-    this.#chunks.push(chunk.subarray(0, room));
-    this.#retained = this.#limit;
-    this.#truncated = true;
-  }
-
-  get truncated(): boolean {
-    return this.#truncated;
-  }
-
-  text(): string {
-    return Buffer.concat(this.#chunks, this.#retained).toString("utf8");
-  }
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function waitForExit(child: ChildProcess): Promise<ExitOutcome> {
@@ -139,50 +106,87 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 }
 
 /**
- * Terminates the guest process group on abort or deadline: SIGTERM first, SIGKILL
- * after the grace period. Returns the abort reason once triggered.
+ * Terminates the guest's process group once: SIGTERM first, SIGKILL after the grace
+ * period. `beforeKill` runs first, so the host bridge is closed before the group is
+ * signalled. The caller's signal counts only until the child's exit is observed.
  */
 class Terminator {
   readonly #child: ChildProcess;
-  readonly #control: ResolvedControl;
-  #reason: AbortReason | undefined;
-  #deadline: NodeJS.Timeout | undefined;
+  readonly #signal: AbortSignal | undefined;
+  readonly #beforeKill: () => void;
+  #triggered = false;
+  #disposed = false;
+  #aborted = false;
   #escalation: NodeJS.Timeout | undefined;
-  readonly #onAbort = (): void => this.trigger("signal");
+  readonly #onAbort = (): void => {
+    this.#aborted = true;
+    this.trigger();
+  };
+  readonly #onExit = (): void => {
+    this.#signal?.removeEventListener("abort", this.#onAbort);
+  };
 
-  constructor(child: ChildProcess, control: ResolvedControl) {
+  constructor(child: ChildProcess, signal: AbortSignal | undefined, beforeKill: () => void) {
     this.#child = child;
-    this.#control = control;
-    control.signal?.addEventListener("abort", this.#onAbort, { once: true });
-    if (control.deadlineAt !== undefined) {
-      const remaining = Math.max(0, control.deadlineAt - performance.now());
-      this.#deadline = setTimeout(() => this.trigger("timeout"), remaining);
-    }
-    if (control.signal?.aborted === true) this.trigger("signal");
+    this.#signal = signal;
+    this.#beforeKill = beforeKill;
+    // Not yet aborted: runSubprocess spawns nothing for an aborted signal, and runs no
+    // other code between that check and here.
+    signal?.addEventListener("abort", this.#onAbort, { once: true });
+    // Ahead of every other exit listener, so nothing they run can still count as an abort.
+    child.prependOnceListener("exit", this.#onExit);
   }
 
-  trigger(reason: AbortReason): void {
-    if (this.#reason !== undefined) return;
-    this.#reason = reason;
+  /** Whether the caller's signal aborted before the child exited (not a later abort). */
+  get aborted(): boolean {
+    return this.#aborted;
+  }
+
+  trigger(): void {
+    // After dispose the child has been reaped: a late trigger (a sink throwing on the
+    // final decoder flush) must not arm a SIGKILL for a process group id that may be reused.
+    if (this.#triggered || this.#disposed) return;
+    this.#triggered = true;
+    this.#beforeKill();
     killGroup(this.#child, "SIGTERM");
-    this.#escalation = setTimeout(() => killGroup(this.#child, "SIGKILL"), this.#control.killGraceMs);
-  }
-
-  get reason(): AbortReason | undefined {
-    return this.#reason;
+    this.#escalation = setTimeout(() => killGroup(this.#child, "SIGKILL"), KILL_GRACE_MS);
   }
 
   dispose(): void {
-    this.#control.signal?.removeEventListener("abort", this.#onAbort);
-    if (this.#deadline !== undefined) clearTimeout(this.#deadline);
+    this.#disposed = true;
+    this.#onExit();
+    this.#child.removeListener("exit", this.#onExit);
     if (this.#escalation !== undefined) clearTimeout(this.#escalation);
   }
 }
 
 /**
- * Starts and reaps one child without interpreting any flavor-specific status file.
- * fd 1 and fd 2 are pipes drained into bounded buffers; the host waits only for the
- * direct child's exit, never for pipe EOF.
+ * Delivers one output stream to the caller's sink as UTF-8 text. A sink that throws
+ * is reported through `onFailure` and receives nothing further.
+ */
+function forward(stream: Readable | null, sink: OutputSink | undefined, onFailure: (error: Error) => void): () => void {
+  if (stream === null || sink === undefined) return () => {};
+  const decoder = new StringDecoder("utf8");
+  let failed = false;
+  const deliver = (text: string): void => {
+    if (failed || text.length === 0) return;
+    try {
+      sink(text);
+    } catch (error) {
+      failed = true;
+      onFailure(toError(error));
+    }
+  };
+  stream.on("data", (chunk: Buffer) => deliver(decoder.write(chunk)));
+  stream.on("error", () => {});
+  return () => deliver(decoder.end());
+}
+
+/**
+ * Starts and reaps one child without interpreting the result envelope.
+ * stdout and stderr go to the caller's sinks (or nowhere); the host waits only for
+ * the direct child's exit, never for pipe EOF. After the child exits, whatever is left
+ * in its process group is killed, so nothing the guest started outlives the execution.
  */
 export async function runSubprocess(
   workspace: PreparedWorkspace,
@@ -191,12 +195,15 @@ export async function runSubprocess(
   arguments_: readonly string[],
   control: ResolvedControl,
 ): Promise<SubprocessResult> {
-  const stdout = new BoundedCapture(control.maxOutputBytes);
-  const stderr = new BoundedCapture(control.maxOutputBytes);
+  // An abort while the caller was still preparing (workspace, check, input file) starts nothing.
+  if (control.signal?.aborted === true) return Object.freeze({ exitCode: null, signal: null, aborted: true });
+
   let outcome: ExitOutcome = { exitCode: null, signal: null };
+  let sinkError: Error | undefined;
   let closeBridge: (() => void) | undefined;
   let terminator: Terminator | undefined;
   let child: ChildProcess | undefined;
+  const flushes: (() => void)[] = [];
   try {
     child = spawn(
       process.execPath,
@@ -204,54 +211,56 @@ export async function runSubprocess(
       {
         cwd,
         env: environment(workspace, control),
-        // Own process group so abort/timeout can terminate guest descendants too.
+        // Own process group so an abort and the final reaping reach guest descendants too.
         detached: process.platform !== "win32",
-        stdio: workspace.hostBindings.size === 0
-          ? ["ignore", "pipe", "pipe"]
-          : ["ignore", "pipe", "pipe", "ipc"],
+        stdio: [
+          "ignore",
+          control.onStdout === undefined ? "ignore" : "pipe",
+          control.onStderr === undefined ? "ignore" : "pipe",
+          ...(workspace.hostBindings.size === 0 ? [] : ["ipc" as const]),
+        ],
         serialization: "json",
       },
     );
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.stdout?.on("error", () => {});
-    child.stderr?.on("error", () => {});
-    terminator = new Terminator(child, control);
+    const started = child;
     if (workspace.hostBindings.size > 0) {
-      closeBridge = attachHostBridge(child, async (id, method, input, signal) => {
+      closeBridge = attachHostBridge(started, async (id, method, input, signal) => {
         const binding = workspace.hostBindings.get(id);
         if (binding === undefined) throw new Error("Host module is not registered for this execution");
         return binding.invoke(method, input, signal);
       });
     }
-    outcome = await waitForExit(child);
-    if (child.pid !== undefined) {
+    terminator = new Terminator(started, control.signal, closeBridge ?? (() => {}));
+    const stop = terminator;
+    const onSinkFailure = (error: Error): void => {
+      sinkError ??= error;
+      stop.trigger();
+    };
+    flushes.push(forward(started.stdout, control.onStdout, onSinkFailure));
+    flushes.push(forward(started.stderr, control.onStderr, onSinkFailure));
+    outcome = await waitForExit(started);
+    if (started.pid !== undefined) {
       await drainAfterExit();
-      // Opt-in reaping of children the guest left behind: the leader is gone, so
-      // this only reaches remaining members of its group (ESRCH when none remain).
-      if (control.killGroupOnExit) killGroup(child, "SIGKILL");
+      // The leader is gone, so this only reaches remaining members of its group
+      // (ESRCH when none remain). A descendant that moved to its own session is out of reach.
+      killGroup(started, "SIGKILL");
     }
   } catch (error) {
-    outcome = {
-      exitCode: null,
-      signal: null,
-      error: error instanceof Error ? error : new Error(String(error)),
-    };
+    outcome = { exitCode: null, signal: null, error: toError(error) };
   } finally {
     closeBridge?.();
     terminator?.dispose();
+    for (const flush of flushes) flush();
     child?.stdout?.destroy();
     child?.stderr?.destroy();
   }
 
-  const aborted = terminator?.reason;
+  const aborted = sinkError === undefined && terminator?.aborted === true;
+  const error = sinkError ?? outcome.error;
   return Object.freeze({
     exitCode: outcome.exitCode,
     signal: outcome.signal,
-    stdout: stdout.text(),
-    stderr: stderr.text(),
-    truncated: Object.freeze({ stdout: stdout.truncated, stderr: stderr.truncated }),
-    ...(aborted === undefined ? {} : { aborted }),
-    ...(outcome.error === undefined ? {} : { error: outcome.error }),
+    aborted,
+    ...(error === undefined ? {} : { error }),
   });
 }

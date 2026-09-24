@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { runtimeCompilerOptions } from "./compiler-options.js";
+import { attachCleanupError } from "./errors.js";
 import type { HostBinding } from "./host-bindings.js";
 import { storageDirectory } from "./storage.js";
 import type { Module } from "./types.js";
@@ -11,19 +12,6 @@ export interface PreparedWorkspace {
   readonly hostBindings: ReadonlyMap<string, HostBinding>;
   readonly entrypoint: string;
   readonly tsconfig: string;
-}
-
-function attachCleanupError(primary: unknown, cleanup: unknown): void {
-  if ((typeof primary !== "object" && typeof primary !== "function") || primary === null) return;
-  try {
-    Object.defineProperty(primary, "cleanupError", {
-      value: cleanup,
-      enumerable: true,
-      configurable: true,
-    });
-  } catch {
-    // Preserve the primary failure even when it cannot accept metadata.
-  }
 }
 
 async function waitForAll(tasks: readonly Promise<unknown>[]): Promise<void> {
